@@ -1,0 +1,40 @@
+[Unit]
+Description=OpenDeploy network policy (egressd)
+Documentation=https://github.com/anreddykarthikreddy3003/opendeploy
+PartOf=opendeploy.target
+After=network-online.target 
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=od-egressd
+Group=od-egressd
+SupplementaryGroups=od-ipc
+ExecStart=/opt/opendeploy/current/bin/egressd --config /etc/opendeploy/node.yaml
+Restart=always
+RestartSec=2
+ReadWritePaths=/var/lib/opendeploy/egressd /run/opendeploy
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0077
+
+[Install]
+WantedBy=opendeploy.target

@@ -1,0 +1,41 @@
+[Unit]
+Description=OpenDeploy artifact store and registry (artifactd)
+Documentation=https://github.com/anreddykarthikreddy3003/opendeploy
+PartOf=opendeploy.target
+After=network-online.target opendeploy-auditd.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=od-artifactd
+Group=od-artifactd
+SupplementaryGroups=od-ipc od-backup od-handoff
+ExecStart=/opt/opendeploy/current/bin/artifactd --config /etc/opendeploy/node.yaml
+Restart=always
+RestartSec=2
+ReadWritePaths=/var/lib/opendeploy/artifactd /var/lib/opendeploy/handoff /var/lib/opendeploy/backup-staging /run/opendeploy
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+UMask=0077
+
+[Install]
+WantedBy=opendeploy.target

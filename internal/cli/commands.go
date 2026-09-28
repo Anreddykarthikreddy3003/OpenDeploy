@@ -23,6 +23,7 @@ import (
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/build/detect"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/config"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/policy"
+	"github.com/anreddykarthikreddy3003/opendeploy/internal/router"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/services"
 )
 
@@ -54,7 +55,7 @@ func init() {
 		{"env", "list|set|rm PROJECT [KEY=VALUE...|KEY] [--env NAME] [--scope environment|project|preview]", "manage environment variables", cmdEnv},
 		{"domains", "list|add|verify PROJECT|DOMAIN [HOST] [--env NAME]", "manage custom domains", cmdDomains},
 		{"plan", "[DIR]", "show how a local directory would be built (offline detection)", cmdPlan},
-		{"admin", "bootstrap-token [--config PATH]", "print the one-time owner bootstrap token (run on the node)", cmdAdmin},
+		{"admin", "bootstrap-token|caddy-config [--config PATH]", "node admin helpers (run on the node)", cmdAdmin},
 		{"restore", "[--from DIR] [--id ID|latest] --master-key FILE [--signer B64] [--list] [--force]", "restore a node from an encrypted backup (services stopped)", cmdRestore},
 		{"doctor", "", "check host capabilities for OpenDeploy", cmdDoctor},
 		{"dev", "[--port 8080] [--data DIR]", "run a single-process development node with the dashboard", cmdDev},
@@ -882,12 +883,18 @@ func cmdAdmin(_ context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(pos) != 1 || pos[0] != "bootstrap-token" {
-		return errors.New("usage: admin bootstrap-token [--config PATH]")
+	if len(pos) != 1 || (pos[0] != "bootstrap-token" && pos[0] != "caddy-config") {
+		return errors.New("usage: admin bootstrap-token|caddy-config [--config PATH]")
 	}
 	n, err := config.Load(*cfgPath)
 	if err != nil {
 		return err
+	}
+	if pos[0] == "caddy-config" {
+		// Bootstrap config for the edge: admin API on the private socket
+		// only; routemgr pushes the full configuration.
+		fmt.Println(string(router.BootstrapConfig(n.Ingress.CaddyAdmin)))
+		return nil
 	}
 	b, err := os.ReadFile(services.BootstrapTokenPath(n))
 	if errors.Is(err, os.ErrNotExist) {

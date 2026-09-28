@@ -1,0 +1,22 @@
+[Unit]
+Description=OpenDeploy rootless BuildKit daemon (trusted builds)
+PartOf=opendeploy.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=od-buildkit
+Group=od-buildkit
+# Rootless BuildKit: user namespaces via newuidmap (subuid/subgid ranges are
+# allocated by the installer). No privileged entitlements are ever enabled.
+ExecStart=/usr/bin/rootlesskit --net=slirp4netns --copy-up=/etc --disable-host-loopback /usr/bin/buildkitd --addr unix:///run/opendeploy/buildkit/buildkitd.sock --group od-buildkit --oci-worker-no-process-sandbox
+Restart=always
+RestartSec=3
+Environment=XDG_RUNTIME_DIR=/run/opendeploy/buildkit
+Delegate=yes
+NoNewPrivileges=no
+ProtectHome=yes
+UMask=0077
+
+[Install]
+WantedBy=opendeploy.target

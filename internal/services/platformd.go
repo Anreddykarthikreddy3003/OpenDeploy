@@ -14,6 +14,7 @@ import (
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/api"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/auth"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/config"
+	"github.com/anreddykarthikreddy3003/opendeploy/internal/hostd"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/identity"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/network"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/platform"
@@ -75,6 +76,9 @@ func NewPlatformd(ctx context.Context, n *config.Node, log *slog.Logger, c *Clie
 		Secrets: c.Secrets, Audit: c.Audit, AuditReader: c.Audit, Egress: eg, GitHub: gh, Log: log,
 		InsecureNoNetworkPolicy: o.InsecureNoNetworkPolicy})
 	p.Backups = backupExporters{c}
+	if !n.DevMode {
+		p.Host = &hostd.Client{C: n.IPCClient(identity.Host, identity.Platform)}
+	}
 	if n.Ingress.Mode == "relay" {
 		p.Relay = &relay.Client{C: n.IPCClient(identity.RelayAgent, identity.Platform)}
 	}

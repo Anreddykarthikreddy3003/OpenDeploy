@@ -169,6 +169,43 @@ func extractRelease(r io.Reader, dir string) error {
 	}
 }
 
+// RecordActive reconciles the slot state with the release that is actually
+// running (hostd calls it at start, when its own binary is the one current
+// points at). It covers first start after install and out-of-band upgrades
+// by the package installer, which swaps current without touching state.json.
+func (s *Slots) RecordActive(version string, schema int) error {
+	st, err := s.State()
+	if err != nil {
+		return err
+	}
+	changed := false
+	if target, err := os.Readlink(filepath.Join(s.Dir, "current")); err == nil {
+		if cur := filepath.Base(target); (cur == "a" || cur == "b") && cur != st.Active {
+			st.Previous, st.Active = st.Active, cur
+			changed = true
+		}
+	}
+	if version != "" && st.Versions[st.Active] != version {
+		st.Versions[st.Active] = version
+		changed = true
+	}
+	if schema != 0 && st.Schemas[st.Active] != schema {
+		st.Schemas[st.Active] = schema
+		changed = true
+	}
+	if st.Staged == st.Active {
+		st.Staged = ""
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	if err := os.MkdirAll(s.Dir, 0o755); err != nil {
+		return err
+	}
+	return s.save(st)
+}
+
 // Activate atomically points current at slot.
 func (s *Slots) Activate(slot string) error {
 	if slot != "a" && slot != "b" {

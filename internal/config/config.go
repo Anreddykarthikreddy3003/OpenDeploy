@@ -403,7 +403,12 @@ func (n *Node) BackupStagingDir() string { return filepath.Join(n.DataDir, "back
 func (n *Node) IdentityMap() (*ipc.IdentityMap, error) {
 	m := map[uint32]string{}
 	if !n.DevMode {
+		// hostd is the root component; UID 0 is its identity.
+		m[0] = identity.Host
 		for _, id := range identity.All {
+			if id == identity.Host {
+				continue
+			}
 			name := identity.UnixUser(id)
 			if u, ok := n.Identity.Users[id]; ok {
 				name = u

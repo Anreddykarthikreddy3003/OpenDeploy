@@ -87,22 +87,23 @@ func (r FirewallReq) Validate() error {
 }
 
 var versionRE = regexp.MustCompile(`^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$`)
-var digestRE = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 
-// UpdateStageReq installs a verified release into the inactive slot. The
-// release must already have been verified by the TUF client in platformd and
-// is re-verified by hostd from its own trusted root before staging.
+var channelRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
+
+// UpdateStageReq installs a release into the inactive slot. hostd resolves
+// and verifies the artifact itself through its own TUF client and trusted
+// root; the request carries no digest, URL or path it could be tricked by.
 type UpdateStageReq struct {
+	Channel string `json:"channel"`
 	Version string `json:"version"`
-	Digest  string `json:"digest"`
 }
 
 func (r UpdateStageReq) Validate() error {
+	if !channelRE.MatchString(r.Channel) {
+		return fmt.Errorf("invalid channel %q", r.Channel)
+	}
 	if !versionRE.MatchString(r.Version) {
 		return fmt.Errorf("invalid version %q", r.Version)
-	}
-	if !digestRE.MatchString(r.Digest) {
-		return fmt.Errorf("invalid digest")
 	}
 	return nil
 }
@@ -146,6 +147,15 @@ type SupportBundle struct {
 	Path   string `json:"path"`
 	Size   int64  `json:"size"`
 	SHA256 string `json:"sha256"`
+}
+
+// UpdateState reports the slots and the last update operation.
+type UpdateState struct {
+	ActiveSlot string            `json:"active_slot"`
+	Versions   map[string]string `json:"versions"`
+	Staged     string            `json:"staged,omitempty"`
+	Operation  string            `json:"operation,omitempty"` // idle | staging | applying | rolled_back | failed | applied
+	Message    string            `json:"message,omitempty"`
 }
 
 type DataPlaneStatus struct {

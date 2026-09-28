@@ -1,0 +1,73 @@
+name: package
+# Builds the deb/rpm packages exactly as a release does, installs the deb on a
+# real systemd host, and deploys apps through the installed node (per-service
+# users, hardened units, rootless BuildKit, containerd, Caddy). Then upgrades
+# in place and removes the package.
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  deb-install:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: dashboard
+        run: cd web && npm ci && npm run build
+      - name: build packages (release config, snapshot)
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --snapshot --clean --skip=before,sign,sbom,publish,validate
+      - name: package metadata
+        run: |
+          dpkg-deb -I dist/opendeploy_*_linux-amd64.deb
+          dpkg-deb -c dist/opendeploy_*_linux-amd64.deb | grep -q './usr/lib/opendeploy/release/packaging/linux/install.sh'
+          rpm -qip dist/opendeploy_*_linux-amd64.rpm || true
+      - name: host prerequisites (Caddy, rootless BuildKit, nftables)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q nftables uidmap slirp4netns
+          curl -fsSL https://github.com/caddyserver/caddy/releases/download/v2.10.2/caddy_2.10.2_linux_amd64.tar.gz | sudo tar -xz -C /usr/bin caddy
+          curl -fsSL https://github.com/moby/buildkit/releases/download/v0.23.2/buildkit-v0.23.2.linux-amd64.tar.gz | sudo tar -xz -C /usr --wildcards 'bin/buildkitd' 'bin/buildctl' 'bin/buildkit-runc'
+          curl -fsSL https://github.com/rootless-containers/rootlesskit/releases/download/v2.3.5/rootlesskit-x86_64.tar.gz | sudo tar -xz -C /usr/bin rootlesskit rootlessctl
+          test -S /run/containerd/containerd.sock
+      - name: install the package
+        run: |
+          sudo OPENDEPLOY_NO_START=1 dpkg -i dist/opendeploy_*_linux-amd64.deb
+          # LAN mode: plain HTTP on :80 for generated hosts under od.test.
+          sudo sed -i -e 's|^  mode: direct .*|  mode: lan|' -e 's|^  base_domain: "".*|  base_domain: "od.test"|' /etc/opendeploy/node.yaml
+          sudo systemctl start opendeploy.target
+          opendeployctl version
+      - name: installed node works end to end
+        run: sudo -E env "PATH=$PATH" go test -tags pkginstall -count=1 -timeout 30m -v ./tests/package/
+      - name: re-install upgrades into the other slot and keeps state
+        run: |
+          sudo /usr/lib/opendeploy/release/packaging/linux/install.sh --force
+          readlink /opt/opendeploy/slots/current | grep -qx b
+          sudo systemctl is-active opendeploy-platformd.service
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8080/healthz && break; sleep 1; done
+          curl -fsS -H 'Host: static.od.test' http://127.0.0.1/ | grep -q 'hello from static'
+          sudo cat /opt/opendeploy/slots/state.json
+          sudo python3 -c 'import json; s=json.load(open("/opt/opendeploy/slots/state.json")); assert s["active"]=="b" and s["previous"]=="a", s'
+      - name: remove
+        run: |
+          sudo dpkg -r opendeploy
+          ! systemctl is-active --quiet opendeploy-platformd.service
+          test -d /var/lib/opendeploy/platformd
+      - name: service journals
+        if: failure()
+        run: sudo journalctl --no-pager -n 400 -u 'opendeploy-*'

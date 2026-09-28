@@ -1,0 +1,253 @@
+//go:build pkginstall
+
+// Package pkginstall checks a node installed from the deb/rpm package on a
+// real systemd host: every unit is up under its own identity, the dashboard
+// is served, and apps deploy through rootless BuildKit, containerd and the
+// Caddy edge. CI runs it after `dpkg -i` (see .github/workflows/package.yml).
+package pkginstall
+
+import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
+	"encoding/json"
+	"fmt"
+	"io"
+	"io/fs"
+	"net/http"
+	"net/http/cookiejar"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+var units = []string{"hostd", "auditd", "secretd", "artifactd", "buildkitd", "builderd", "runtimed", "caddy", "routemgr", "egressd", "platformd"}
+
+func env(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
+}
+
+type client struct {
+	t    *testing.T
+	base string
+	hc   *http.Client
+	csrf string
+}
+
+func (c *client) do(method, path, ctype string, body io.Reader, out any) int {
+	c.t.Helper()
+	req, _ := http.NewRequest(method, c.base+path, body)
+	if ctype != "" {
+		req.Header.Set("Content-Type", ctype)
+	}
+	req.Header.Set("X-CSRF-Token", c.csrf)
+	res, err := c.hc.Do(req)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	defer res.Body.Close()
+	b, _ := io.ReadAll(res.Body)
+	if out != nil {
+		_ = json.Unmarshal(b, out)
+	}
+	if res.StatusCode >= 400 {
+		c.t.Logf("%s %s -> %d %s", method, path, res.StatusCode, b)
+	}
+	return res.StatusCode
+}
+
+func (c *client) json(method, path string, body, out any) int {
+	b, _ := json.Marshal(body)
+	return c.do(method, path, "application/json", bytes.NewReader(b), out)
+}
+
+func tarGz(t *testing.T, dir string) *bytes.Buffer {
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(dir, p)
+		if rel == "." {
+			return nil
+		}
+		fi, err := d.Info()
+		if err != nil {
+			return err
+		}
+		h, err := tar.FileInfoHeader(fi, "")
+		if err != nil {
+			return err
+		}
+		h.Name = filepath.ToSlash(rel)
+		if d.IsDir() {
+			h.Name += "/"
+		}
+		if err := tw.WriteHeader(h); err != nil {
+			return err
+		}
+		if d.Type().IsRegular() {
+			b, err := os.ReadFile(p)
+			if err != nil {
+				return err
+			}
+			_, err = tw.Write(b)
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tw.Close()
+	gz.Close()
+	return &buf
+}
+
+func journal(t *testing.T, unit string) {
+	out, _ := exec.Command("journalctl", "--no-pager", "-n", "80", "-u", "opendeploy-"+unit+".service").CombinedOutput()
+	t.Logf("journal %s:\n%s", unit, out)
+}
+
+func TestInstalledNode(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("run as root on a host where the package is installed")
+	}
+	api := env("OPENDEPLOY_URL", "http://127.0.0.1:8080")
+
+	t.Run("units", func(t *testing.T) {
+		deadline := time.Now().Add(90 * time.Second)
+		for _, u := range units {
+			for {
+				out, _ := exec.Command("systemctl", "is-active", "opendeploy-"+u+".service").Output()
+				if strings.TrimSpace(string(out)) == "active" {
+					break
+				}
+				if time.Now().After(deadline) {
+					journal(t, u)
+					t.Fatalf("opendeploy-%s is %s", u, strings.TrimSpace(string(out)))
+				}
+				time.Sleep(time.Second)
+			}
+		}
+		// SC-10: services run under their own identities, only hostd as root.
+		for _, u := range units {
+			out, err := exec.Command("systemctl", "show", "-p", "User", "--value", "opendeploy-"+u+".service").Output()
+			if err != nil {
+				t.Fatal(err)
+			}
+			user := strings.TrimSpace(string(out))
+			if (u == "hostd") != (user == "root") {
+				t.Errorf("opendeploy-%s runs as %q", u, user)
+			}
+		}
+	})
+
+	t.Run("dashboard", func(t *testing.T) {
+		deadline := time.Now().Add(60 * time.Second)
+		for {
+			res, err := http.Get(api + "/healthz")
+			if err == nil && res.StatusCode == 200 {
+				res.Body.Close()
+				break
+			}
+			if time.Now().After(deadline) {
+				journal(t, "platformd")
+				t.Fatalf("platformd never became healthy: %v", err)
+			}
+			time.Sleep(time.Second)
+		}
+		res, err := http.Get(api + "/")
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		if res.StatusCode != 200 || !strings.Contains(string(b), `id="root"`) || res.Header.Get("Content-Security-Policy") == "" {
+			t.Fatalf("dashboard: %d csp=%q", res.StatusCode, res.Header.Get("Content-Security-Policy"))
+		}
+	})
+
+	t.Run("deploy", func(t *testing.T) {
+		tok, err := exec.Command("opendeployctl", "admin", "bootstrap-token").Output()
+		if err != nil {
+			t.Fatalf("bootstrap token: %v", err)
+		}
+		jar, _ := cookiejar.New(nil)
+		c := &client{t: t, base: api, hc: &http.Client{Jar: jar, Timeout: 5 * time.Minute}}
+		var sess struct {
+			CSRFToken string `json:"csrf_token"`
+		}
+		if c.json("POST", "/api/v2/auth/bootstrap", map[string]string{"token": strings.TrimSpace(string(tok)),
+			"email": "owner@example.com", "password": "correct horse battery staple"}, &sess) != 201 {
+			t.Fatal("bootstrap")
+		}
+		c.csrf = sess.CSRFToken
+		for _, a := range []struct{ name, dir, want string }{
+			{"static", "../e2e/fixtures/static", "hello from static"},
+			{"node", "../e2e/fixtures/node", "hello from node"},
+		} {
+			t.Run(a.name, func(t *testing.T) {
+				c.t = t
+				var created struct {
+					Project struct {
+						ID string `json:"id"`
+					} `json:"project"`
+				}
+				if c.json("POST", "/api/v2/projects", map[string]any{"name": a.name}, &created) != 201 {
+					t.Fatal("create project")
+				}
+				var dep struct {
+					ID string `json:"id"`
+				}
+				if code := c.do("POST", "/api/v2/projects/"+created.Project.ID+"/deployments/upload", "application/gzip", tarGz(t, a.dir), &dep); code != 202 {
+					t.Fatalf("upload %d", code)
+				}
+				var st string
+				for deadline := time.Now().Add(15 * time.Minute); time.Now().Before(deadline); time.Sleep(2 * time.Second) {
+					var out struct {
+						Deployment struct {
+							Status string `json:"status"`
+						} `json:"deployment"`
+					}
+					c.json("GET", "/api/v2/deployments/"+dep.ID, nil, &out)
+					if st = out.Deployment.Status; st == "SUCCEEDED" || st == "FAILED" {
+						break
+					}
+				}
+				if st != "SUCCEEDED" {
+					var logs []struct {
+						Line string `json:"line"`
+					}
+					c.json("GET", "/api/v2/deployments/"+dep.ID+"/logs", nil, &logs)
+					for _, l := range logs {
+						t.Log(l.Line)
+					}
+					for _, u := range []string{"builderd", "buildkitd", "runtimed", "platformd"} {
+						journal(t, u)
+					}
+					t.Fatalf("deployment ended in %s", st)
+				}
+				req, _ := http.NewRequest("GET", "http://127.0.0.1:80/", nil)
+				req.Host = fmt.Sprintf("%s.%s", a.name, env("OPENDEPLOY_BASE_DOMAIN", "od.test"))
+				res, err := http.DefaultClient.Do(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				body, _ := io.ReadAll(res.Body)
+				res.Body.Close()
+				if res.StatusCode != 200 || !strings.Contains(string(body), a.want) {
+					t.Fatalf("GET %s -> %d %q", req.Host, res.StatusCode, body)
+				}
+			})
+		}
+	})
+}

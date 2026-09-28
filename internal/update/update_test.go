@@ -312,3 +312,28 @@ func TestSlotsRollbackAndMigrationSafety(t *testing.T) {
 		}
 	}
 }
+
+// The package installer swaps current without writing state.json; hostd's
+// start-up reconciliation must follow the symlink and the running version.
+func TestRecordActiveFollowsOutOfBandUpgrade(t *testing.T) {
+	s := &Slots{Dir: t.TempDir()}
+	_ = os.MkdirAll(filepath.Join(s.Dir, "a"), 0o755)
+	_ = os.MkdirAll(filepath.Join(s.Dir, "b"), 0o755)
+	_ = os.Symlink("a", filepath.Join(s.Dir, "current"))
+	if err := s.RecordActive("2.0.0", 1); err != nil {
+		t.Fatal(err)
+	}
+	// installer upgrade: new release into b, current -> b
+	_ = os.Remove(filepath.Join(s.Dir, "current"))
+	_ = os.Symlink("b", filepath.Join(s.Dir, "current"))
+	if err := s.RecordActive("2.1.0", 2); err != nil {
+		t.Fatal(err)
+	}
+	st, err := s.State()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Active != "b" || st.Previous != "a" || st.Versions["b"] != "2.1.0" || st.Schemas["b"] != 2 || st.Versions["a"] != "2.0.0" {
+		t.Fatalf("state not reconciled: %+v", st)
+	}
+}

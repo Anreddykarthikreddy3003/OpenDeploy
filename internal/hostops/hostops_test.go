@@ -26,11 +26,14 @@ func TestValidation(t *testing.T) {
 	if (ServiceReq{Service: "platformd; rm -rf /"}).Validate() == nil {
 		t.Fatal("injection accepted")
 	}
-	if (UpdateStageReq{Version: "1.2.3", Digest: "sha256:" + string(make([]byte, 64))}).Validate() == nil {
-		t.Fatal("bad digest accepted")
+	if (UpdateStageReq{Channel: "stable; reboot", Version: "1.2.3"}).Validate() == nil {
+		t.Fatal("bad channel accepted")
 	}
-	if (UpdateStageReq{Version: "../../x", Digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"}).Validate() == nil {
+	if (UpdateStageReq{Channel: "stable", Version: "../../x"}).Validate() == nil {
 		t.Fatal("bad version accepted")
+	}
+	if (UpdateStageReq{Channel: "stable", Version: "2.1.0"}).Validate() != nil {
+		t.Fatal("valid stage rejected")
 	}
 	if (FirewallReq{HTTPPort: 80, HTTPSPort: 443}).Validate() != nil {
 		t.Fatal("valid firewall rejected")

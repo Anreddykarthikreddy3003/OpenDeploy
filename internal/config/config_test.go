@@ -67,3 +67,14 @@ func TestSecretFilePerms(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// The node.yaml shipped in packages must parse and validate.
+func TestPackagedExampleConfig(t *testing.T) {
+	n, err := Load("../../packaging/linux/etc/node.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n.Ingress.CaddyAdmin != "/run/opendeploy/caddy/admin.sock" || n.Runtime.Backend != "containerd" || !n.Egress.Enforce {
+		t.Fatalf("unexpected defaults: %+v", n.Ingress)
+	}
+}

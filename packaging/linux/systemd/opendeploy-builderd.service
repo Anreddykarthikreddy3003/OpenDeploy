@@ -1,0 +1,41 @@
+[Unit]
+Description=OpenDeploy build service (builderd)
+Documentation=https://github.com/anreddykarthikreddy3003/opendeploy
+PartOf=opendeploy.target
+After=network-online.target opendeploy-artifactd.service opendeploy-buildkitd.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=od-builderd
+Group=od-builderd
+SupplementaryGroups=od-ipc od-handoff od-sources od-buildkit
+ExecStart=/opt/opendeploy/current/bin/builderd --config /etc/opendeploy/node.yaml
+Restart=always
+RestartSec=2
+ReadWritePaths=/var/lib/opendeploy/builderd /var/lib/opendeploy/build /var/lib/opendeploy/build-cache /var/lib/opendeploy/sources /var/lib/opendeploy/handoff /run/opendeploy
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+UMask=0077
+
+[Install]
+WantedBy=opendeploy.target

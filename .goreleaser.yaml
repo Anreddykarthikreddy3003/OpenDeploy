@@ -10,18 +10,22 @@ before:
     - go mod download
     - sh -c 'cd web && npm ci && npm run build'
 
-x-common: &common
-  env: [CGO_ENABLED=0]
-  flags: [-trimpath]
-  mod_timestamp: "{{ .CommitTimestamp }}"
-  ldflags:
-    - -s -w -buildid=
-    - -X github.com/anreddykarthikreddy3003/opendeploy/internal/daemon.Version={{ .Version }}
-    - -X github.com/anreddykarthikreddy3003/opendeploy/internal/cli.Version={{ .Version }}
-    - -X main.version={{ .Version }}
-
 builds:
-  - {<<: *common, id: platformd, main: ./cmd/platformd, binary: bin/platformd, goos: [linux], goarch: [amd64, arm64]}
+  # The first entry carries the shared settings; the rest merge them.
+  - &common
+    id: platformd
+    main: ./cmd/platformd
+    binary: bin/platformd
+    goos: [linux]
+    goarch: [amd64, arm64]
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    ldflags:
+      - -s -w -buildid=
+      - -X github.com/anreddykarthikreddy3003/opendeploy/internal/daemon.Version={{ .Version }}
+      - -X github.com/anreddykarthikreddy3003/opendeploy/internal/cli.Version={{ .Version }}
+      - -X main.version={{ .Version }}
   - {<<: *common, id: auditd, main: ./cmd/auditd, binary: bin/auditd, goos: [linux], goarch: [amd64, arm64]}
   - {<<: *common, id: secretd, main: ./cmd/secretd, binary: bin/secretd, goos: [linux], goarch: [amd64, arm64]}
   - {<<: *common, id: artifactd, main: ./cmd/artifactd, binary: bin/artifactd, goos: [linux], goarch: [amd64, arm64]}
@@ -31,16 +35,17 @@ builds:
   - {<<: *common, id: egressd, main: ./cmd/egressd, binary: bin/egressd, goos: [linux], goarch: [amd64, arm64]}
   - {<<: *common, id: relay-agent, main: ./cmd/relay-agent, binary: bin/relay-agent, goos: [linux], goarch: [amd64, arm64]}
   - {<<: *common, id: opendeploy-hostd, main: ./cmd/opendeploy-hostd, binary: bin/opendeploy-hostd, goos: [linux], goarch: [amd64, arm64]}
+  - {<<: *common, id: opendeployctl-node, main: ./cmd/opendeployctl, binary: bin/opendeployctl, goos: [linux], goarch: [amd64, arm64]}
   - {<<: *common, id: opendeployctl, main: ./cmd/opendeployctl, binary: bin/opendeployctl, goos: [linux, darwin, windows], goarch: [amd64, arm64]}
   - {<<: *common, id: relay-server, main: ./relay-server/cmd/relay-server, binary: bin/relay-server, goos: [linux], goarch: [amd64, arm64]}
 
 archives:
   # Node release: everything a slot needs (hostd stages exactly this).
   - id: node
-    ids: [platformd, auditd, secretd, artifactd, builderd, runtimed, routemgr, egressd, relay-agent, opendeploy-hostd, opendeployctl]
+    ids: [platformd, auditd, secretd, artifactd, builderd, runtimed, routemgr, egressd, relay-agent, opendeploy-hostd, opendeployctl-node]
     formats: [tar.gz]
     name_template: "opendeploy_{{ .Version }}_{{ .Os }}-{{ .Arch }}"
-    files: [LICENSE*, README.md, packaging/linux/**/*]
+    files: [LICENSE*, README.md, packaging/linux/install.sh, packaging/linux/**/*]
   - id: cli
     ids: [opendeployctl]
     formats: [tar.gz]
@@ -50,6 +55,40 @@ archives:
     ids: [relay-server]
     formats: [tar.gz]
     name_template: "opendeploy-relay_{{ .Version }}_{{ .Os }}-{{ .Arch }}"
+
+nfpms:
+  # deb/rpm carry the same node payload under /usr/lib/opendeploy/release;
+  # the maintainer script runs packaging/linux/install.sh, which stages it
+  # into an A/B slot (never downgrading a newer release applied by the
+  # verified updater) and starts opendeploy.target.
+  - id: node
+    package_name: opendeploy
+    ids: [platformd, auditd, secretd, artifactd, builderd, runtimed, routemgr, egressd, relay-agent, opendeploy-hostd, opendeployctl-node]
+    formats: [deb, rpm]
+    bindir: /usr/lib/opendeploy/release
+    file_name_template: "{{ .PackageName }}_{{ .Version }}_{{ .Os }}-{{ .Arch }}"
+    vendor: OpenDeploy
+    homepage: https://github.com/anreddykarthikreddy3003/opendeploy
+    maintainer: anreddykarthikreddy3003 <anreddykarthikreddy3003@users.noreply.github.com>
+    description: Local-first, security-hardened deployment platform (control plane, builders, runtime, router).
+    section: admin
+    priority: optional
+    dependencies: [systemd, nftables, curl]
+    recommends: [containerd, uidmap]
+    suggests: [runsc]
+    contents:
+      - src: packaging/linux
+        dst: /usr/lib/opendeploy/release/packaging/linux
+        type: tree
+      - src: README.md
+        dst: /usr/share/doc/opendeploy/README.md
+    scripts:
+      postinstall: packaging/linux/nfpm/postinstall.sh
+      preremove: packaging/linux/nfpm/preremove.sh
+    overrides:
+      rpm:
+        dependencies: [systemd, nftables, curl, shadow-utils]
+        recommends: [containerd]
 
 checksum:
   name_template: checksums.txt

@@ -3,6 +3,7 @@ package platform
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -12,6 +13,7 @@ import (
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/daemon"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/identity"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/state"
+	"github.com/anreddykarthikreddy3003/opendeploy/internal/store"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/update"
 )
 
@@ -102,6 +104,13 @@ func (p *Platform) ApplyUpdate(ctx context.Context, version string) error {
 	}
 	if st.Blocked != "" {
 		return errors.New(st.Blocked)
+	}
+	// A release that migrates the schema forward cannot be rolled back
+	// automatically: take a backup first and refuse to proceed without one.
+	if st.Available.SchemaVersion > store.SchemaVersion {
+		if _, err := p.RunBackup(ctx); err != nil {
+			return fmt.Errorf("pre-update backup failed (required before a schema migration): %w", err)
+		}
 	}
 	return p.Host.ApplyUpdate(ctx, p.Node.Update.Channel, version)
 }
