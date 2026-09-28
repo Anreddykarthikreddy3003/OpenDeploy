@@ -43,6 +43,12 @@ type Node struct {
 	Update   UpdateConfig   `yaml:"update"`
 	Secrets  SecretsConfig  `yaml:"secrets"`
 	Identity IdentityConfig `yaml:"identity"`
+	Artifact ArtifactConfig `yaml:"artifact"`
+}
+
+type ArtifactConfig struct {
+	RegistryListen string `yaml:"registry_listen"`
+	MaxImageBytes  int64  `yaml:"max_image_bytes"`
 }
 
 type APIConfig struct {
@@ -241,6 +247,10 @@ func (n *Node) ApplyDefaults() {
 	def(&n.Backup.LocalDir, filepath.Join(n.DataDir, "backups"))
 	def(&n.Update.Channel, "stable")
 	def(&n.Update.SlotsDir, "/opt/opendeploy/slots")
+	def(&n.Artifact.RegistryListen, "127.0.0.1:5010")
+	if n.Artifact.MaxImageBytes == 0 {
+		n.Artifact.MaxImageBytes = 10 << 30
+	}
 	def(&n.Secrets.KEKFile, filepath.Join(n.DataDir, "secretd", "kek"))
 	if n.Build.MaxConcurrent == 0 {
 		switch n.Profile {
@@ -330,6 +340,10 @@ func checkAdminBind(host string, ra RemoteAdminConfig) error {
 
 // Socket returns the IPC socket path for a service identity.
 func (n *Node) Socket(id string) string { return filepath.Join(n.RunDir, id+".sock") }
+
+// HandoffDir is the build-output handoff directory (builderd writes,
+// artifactd reads and re-validates).
+func (n *Node) HandoffDir() string { return filepath.Join(n.DataDir, "handoff") }
 
 // ServiceDir returns the private state directory for a service identity.
 func (n *Node) ServiceDir(id string) string { return filepath.Join(n.DataDir, id) }
