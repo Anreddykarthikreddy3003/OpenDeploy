@@ -4,8 +4,8 @@ import { NavLink, Route, Routes } from "react-router-dom";
 import { errorMessage, get, patch, post, put, del } from "../api/client";
 import type { AuditEvent, GitStatus, Job, SecretMeta, User } from "../api/types";
 import { useAuth } from "../auth";
-import { Alert, Badge, Button, Card, Code, EmptyState, Field, Input, Loading, PageHeader, Select, Toggle, cx, useToast } from "../components/ui";
-import { formatDate, timeAgo } from "../lib/format";
+import { Alert, Badge, Button, Card, Code, CopyButton, EmptyState, Field, Input, Loading, PageHeader, Select, Toggle, cx, useToast } from "../components/ui";
+import { bytes, formatDate, timeAgo } from "../lib/format";
 
 export function PlatformPage() {
   const { user } = useAuth();
@@ -15,6 +15,8 @@ export function PlatformPage() {
     { to: "github", label: "GitHub", owner: true },
     { to: "users", label: "Users" },
     { to: "variables", label: "Instance variables", owner: true },
+    { to: "backups", label: "Backups", owner: true },
+    { to: "updates", label: "Updates", owner: true },
     { to: "audit", label: "Audit log", owner: true },
     { to: "jobs", label: "Jobs", owner: true },
   ].filter((t) => !t.owner || owner);
@@ -38,6 +40,8 @@ export function PlatformPage() {
         <Route path="github" element={<GitHub />} />
         <Route path="users" element={<Users />} />
         <Route path="variables" element={<InstanceVars />} />
+        <Route path="backups" element={<Backups />} />
+        <Route path="updates" element={<Updates />} />
         <Route path="audit" element={<Audit />} />
         <Route path="jobs" element={<Jobs />} />
       </Routes>
@@ -539,6 +543,178 @@ function Jobs() {
           </table>
         </Card>
       </div>
+    </div>
+  );
+}
+
+function Backups() {
+  const toast = useToast();
+  const qc = useQueryClient();
+  const q = useQuery({ queryKey: ["backups"], queryFn: () => get<any>("/api/v2/system/backups"), refetchInterval: 10000 });
+  const [key, setKey] = useState("");
+  if (q.isLoading) return <Loading />;
+  if (q.error) return <Alert>{errorMessage(q.error)}</Alert>;
+  const st = q.data.status;
+  const run = async () => {
+    try {
+      await post("/api/v2/system/backups");
+      toast("green", "Backup queued");
+      setTimeout(() => qc.invalidateQueries({ queryKey: ["backups"] }), 1500);
+    } catch (e) {
+      toast("red", errorMessage(e));
+    }
+  };
+  const exportKey = async () => {
+    try {
+      const r = await post<{ master_key: string }>("/api/v2/system/backups/master-key");
+      setKey(r.master_key);
+    } catch (e) {
+      toast("red", errorMessage(e));
+    }
+  };
+  return (
+    <div className="space-y-6">
+      {st.config_error && <Alert tone="amber" title="Backups are not configured">{st.config_error}</Alert>}
+      <div className="grid gap-6 lg:grid-cols-2">
+        <Card title="Configuration" actions={<Button size="sm" variant="primary" onClick={run} disabled={!!st.config_error}>Back up now</Button>}>
+          <dl className="grid grid-cols-2 gap-y-2 text-sm">
+            <dt className="text-zinc-500">Scheduled</dt>
+            <dd>{st.enabled ? <Code>{st.schedule}</Code> : "off (manual only)"}</dd>
+            <dt className="text-zinc-500">Target</dt>
+            <dd className="break-all">{st.target || "—"}</dd>
+            <dt className="text-zinc-500">Object lock</dt>
+            <dd>{st.object_lock ? `yes · ${st.retain_days} days` : <span className="text-amber-300">no</span>}</dd>
+            <dt className="text-zinc-500">Master key</dt>
+            <dd>
+              <Code>{st.master_key_id}</Code>
+            </dd>
+          </dl>
+          {!st.object_lock && <p className="mt-3 text-xs text-zinc-500">Enable object lock on an S3 bucket so a compromised node cannot delete its backups.</p>}
+        </Card>
+        <Card title="Last backup">
+          {st.last ? (
+            <div className="space-y-2 text-sm">
+              <p>
+                <Badge tone={st.last.ok ? "green" : "red"}>{st.last.ok ? "succeeded" : "failed"}</Badge> <span className="ml-2 text-zinc-400">{formatDate(st.last.at)} · {st.last.duration}</span>
+              </p>
+              {st.last.ok ? <p className="text-zinc-400">{st.last.id} · {bytes(st.last.size)}</p> : <Alert>{st.last.error}</Alert>}
+            </div>
+          ) : (
+            <p className="text-sm text-zinc-500">No backup has run yet.</p>
+          )}
+        </Card>
+      </div>
+      <Card title="Disaster recovery key">
+        <p className="text-sm text-zinc-400">
+          Backups are encrypted with a master key that is never stored inside them. Keep a copy offline (password manager, safe): restoring on a new node requires it together with the signer key below.
+        </p>
+        <p className="mt-2 text-xs text-zinc-500">
+          Manifest signer: <Code>{st.signer_public_key}</Code>
+        </p>
+        {key ? (
+          <div className="mt-3 flex gap-2">
+            <Input readOnly value={key} className="font-mono" />
+            <CopyButton value={key} />
+          </div>
+        ) : (
+          <Button className="mt-3" onClick={exportKey}>
+            Reveal master key
+          </Button>
+        )}
+      </Card>
+      <Card title="Backups" padded={false}>
+        {q.data.list_error && <p className="p-4 text-sm text-red-300">{q.data.list_error}</p>}
+        {q.data.backups?.length === 0 && <p className="p-4 text-sm text-zinc-500">None yet.</p>}
+        <ul className="divide-y divide-zinc-800">
+          {q.data.backups?.map((b: any) => (
+            <li key={b.id} className="flex items-center justify-between gap-3 px-4 py-2.5 text-sm">
+              <div>
+                <p className="font-mono text-zinc-200">{b.id}</p>
+                <p className="text-xs text-zinc-500">{b.error ? <span className="text-red-300">{b.error}</span> : `${formatDate(b.created_at)} · ${b.components?.length ?? 0} components · v${b.version}`}</p>
+              </div>
+              <div className="flex items-center gap-2">
+                {b.object_lock && <Badge tone="green">locked</Badge>}
+                <span className="text-xs text-zinc-400">{bytes(b.size)}</span>
+              </div>
+            </li>
+          ))}
+        </ul>
+        <p className="border-t border-zinc-800 px-4 py-3 text-xs text-zinc-500">
+          Restore onto a clean node with <Code>opendeployctl restore --master-key FILE --signer KEY</Code>.
+        </p>
+      </Card>
+    </div>
+  );
+}
+
+function Updates() {
+  const toast = useToast();
+  const qc = useQueryClient();
+  const q = useQuery({ queryKey: ["updates"], queryFn: () => get<any>("/api/v2/system/updates") });
+  const [busy, setBusy] = useState("");
+  if (q.isLoading) return <Loading />;
+  if (q.error) return <Alert>{errorMessage(q.error)}</Alert>;
+  const st = q.data;
+  const check = async () => {
+    setBusy("check");
+    try {
+      qc.setQueryData(["updates"], await post("/api/v2/system/updates/check"));
+    } catch (e) {
+      toast("red", errorMessage(e));
+    } finally {
+      setBusy("");
+    }
+  };
+  const apply = async () => {
+    if (!confirm(`Install OpenDeploy ${st.available.version}? Services restart; a failed readiness check rolls back automatically.`)) return;
+    setBusy("apply");
+    try {
+      await post("/api/v2/system/updates/apply", { version: st.available.version });
+      toast("green", "Update is being applied");
+    } catch (e) {
+      toast("red", errorMessage(e));
+    } finally {
+      setBusy("");
+    }
+  };
+  return (
+    <div className="space-y-6">
+      {st.current_revoked && <Alert title="The running version has been revoked by the publisher">Install the offered release as soon as possible.</Alert>}
+      <Card title="Platform version" actions={<Button size="sm" loading={busy === "check"} onClick={check} disabled={!st.configured}>Check now</Button>}>
+        <dl className="grid grid-cols-2 gap-y-2 text-sm">
+          <dt className="text-zinc-500">Running</dt>
+          <dd>{st.current}</dd>
+          <dt className="text-zinc-500">Channel</dt>
+          <dd>{st.channel}</dd>
+          <dt className="text-zinc-500">Platform</dt>
+          <dd>{st.platform}</dd>
+          <dt className="text-zinc-500">Last check</dt>
+          <dd>{st.checked_at ? timeAgo(st.checked_at) : "never"}</dd>
+        </dl>
+        {!st.configured && <p className="mt-3 text-xs text-zinc-500">Set update.repository_url and update.trusted_root (the pinned TUF root) in node.yaml.</p>}
+        {st.error && (
+          <div className="mt-3">
+            <Alert title="Update verification failed">{st.error}</Alert>
+          </div>
+        )}
+      </Card>
+      {st.available && (
+        <Card title={`OpenDeploy ${st.available.version}`}>
+          <p className="text-xs text-zinc-500">
+            Published {formatDate(st.available.published_at)} · verified with threshold-signed TUF metadata · schema v{st.available.schema_version}
+          </p>
+          {st.available.notes && <p className="mt-3 whitespace-pre-wrap text-sm text-zinc-300">{st.available.notes}</p>}
+          {st.blocked ? (
+            <div className="mt-3">
+              <Alert tone="amber" title="Cannot install">{st.blocked}</Alert>
+            </div>
+          ) : (
+            <Button className="mt-4" variant="primary" loading={busy === "apply"} onClick={apply}>
+              Install update
+            </Button>
+          )}
+        </Card>
+      )}
     </div>
   );
 }

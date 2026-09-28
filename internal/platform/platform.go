@@ -88,6 +88,8 @@ type Deps struct {
 	DNS domains.Verifier
 	// TLSProbe inspects the edge certificate for a domain (tests replace it).
 	TLSProbe TLSProbe
+	// Host is the privileged host agent (nil in dev / single-process mode).
+	Host HostAgent
 	// Backups exports per-service state for backups.
 	Backups BackupExporters
 	// Relay reports the relay tunnel (relay ingress mode only).
