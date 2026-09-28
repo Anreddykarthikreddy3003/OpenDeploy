@@ -20,7 +20,7 @@ func (s *Server) handleSystemStatus(w http.ResponseWriter, r *http.Request) erro
 		"version":      versionString(),
 		"profile":      s.P.Node.Profile,
 		"ingress_mode": s.P.Node.Ingress.Mode,
-		"base_domain":  s.P.Node.Ingress.BaseDomain,
+		"base_domain":  s.P.BaseDomain(),
 		"degraded":     s.S.DB.Degraded(),
 		"dev_mode":     s.P.Node.DevMode,
 		"require_mfa":  s.RequireMFA,
@@ -32,6 +32,13 @@ func (s *Server) handleSystemStatus(w http.ResponseWriter, r *http.Request) erro
 	}
 	if st, err := s.P.Egress.Status(ctx); err == nil {
 		out["network_policy"] = st
+	}
+	if s.P.Node.Ingress.Mode == "relay" && s.P.Relay != nil {
+		if st, err := s.P.Relay.Status(ctx); err == nil {
+			out["relay"] = st
+		} else {
+			out["relay_error"] = "relay agent unreachable"
+		}
 	}
 	if cur, err := s.P.Router.Current(ctx); err == nil {
 		out["edge"] = map[string]any{"digest": cur.Digest, "routes": len(cur.Table.Routes)}

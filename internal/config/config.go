@@ -331,8 +331,19 @@ func (n *Node) Validate() error {
 			}
 		}
 	}
-	if n.Ingress.Mode == "relay" && n.Ingress.Relay.ServerAddr == "" {
-		p = append(p, "ingress.relay.server_addr required in relay mode")
+	if n.Ingress.Mode == "relay" {
+		r := n.Ingress.Relay
+		if r.ServerAddr == "" {
+			p = append(p, "ingress.relay.server_addr required in relay mode")
+		} else if _, _, err := net.SplitHostPort(r.ServerAddr); err != nil {
+			p = append(p, "ingress.relay.server_addr must be host:port")
+		}
+		if !dnsLabel(r.InstanceID) || !dnsLabel(r.TenantID) {
+			p = append(p, "ingress.relay.instance_id and tenant_id must be DNS labels (a-z, 0-9, '-') in relay mode")
+		}
+		if r.PublicSuffix == "" {
+			p = append(p, "ingress.relay.public_suffix required in relay mode")
+		}
 	}
 	if n.DevMode && os.Getenv("OPENDEPLOY_INSECURE_DEV") != "1" {
 		p = append(p, "dev_mode requires OPENDEPLOY_INSECURE_DEV=1 (never use in production)")
@@ -427,4 +438,16 @@ func ReadSecretFile(p string) ([]byte, error) {
 		return nil, err
 	}
 	return bytes.TrimSpace(b), nil
+}
+
+func dnsLabel(s string) bool {
+	if len(s) < 2 || len(s) > 40 || s[0] == '-' || s[len(s)-1] == '-' {
+		return false
+	}
+	for _, c := range s {
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
+			return false
+		}
+	}
+	return true
 }

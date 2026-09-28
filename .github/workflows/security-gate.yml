@@ -34,6 +34,12 @@ jobs:
           set -o pipefail
           sudo -E env "PATH=$PATH" go test -tags adversarial -count=1 -v ./tests/adversarial/ | tee adversarial.log
           if grep -q "CAPABILITY-BLOCKED" adversarial.log; then echo "::warning::some controls were capability-blocked on this runner"; fi
+      - name: Relay isolation and domain lifecycle (ST-07, ST-08)
+        run: |
+          set -o pipefail
+          go test -race -count=1 -v ./internal/relay/ ./internal/domains/ | tee -a adversarial.log
+          go test -race -count=1 -v -run 'Domain|RelayMode' ./internal/platform/ | tee -a adversarial.log
+          go test -count=1 -run '^$' -fuzz FuzzPeekSNI -fuzztime 60s ./internal/relay/
       - uses: actions/upload-artifact@v4
         if: always()
         with:

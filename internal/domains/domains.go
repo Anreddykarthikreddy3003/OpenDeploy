@@ -97,5 +97,12 @@ func NewToken() string {
 // to this OpenDeploy instance and to the claim's random token; tokens of
 // earlier (expired, detached or other-instance) claims never match.
 func TXTValue(instanceID, token string) string {
-	return "opendeploy-claim=v1;instance=" + instanceID + ";token=" + token
+	return InstancePrefix(instanceID) + "token=" + token
+}
+
+// InstancePrefix is the part of a claim record that names the instance; a
+// relay authorises custom-domain routes for an instance only while such a
+// record is published (the domain owner keeps it for relay mode).
+func InstancePrefix(instanceID string) string {
+	return "opendeploy-claim=v1;instance=" + instanceID + ";"
 }

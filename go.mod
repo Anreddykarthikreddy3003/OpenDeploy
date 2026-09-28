@@ -5,6 +5,7 @@ go 1.26.6
 require (
 	github.com/containerd/containerd/v2 v2.4.1
 	github.com/containerd/errdefs v1.0.0
+	github.com/hashicorp/yamux v0.1.2
 	github.com/miekg/dns v1.1.73
 	github.com/opencontainers/runtime-spec v1.3.0
 	github.com/vishvananda/netlink v1.3.1

@@ -255,3 +255,27 @@ func TestDomainTLSCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestRelayModeNaming(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	h.p.Node.Ingress.BaseDomain = ""
+	h.p.Node.Ingress.Mode = "relay"
+	h.p.Node.Ingress.Relay.InstanceID = "home-1"
+	h.p.Node.Ingress.Relay.PublicSuffix = "relay.example.net"
+	if got := h.p.GeneratedHostname("web", "production"); got != "web.home-1.relay.example.net" {
+		t.Fatalf("generated host %q", got)
+	}
+	// The instance's relay namespace is reserved for generated names.
+	if _, _, err := h.p.ClaimDomain(ctx, h.prj, "", "web.home-1.relay.example.net"); !errors.Is(err, ErrDomainReserved) {
+		t.Fatalf("relay namespace claimable: %v", err)
+	}
+	_, in, err := h.p.ClaimDomain(ctx, h.prj, "", "www.acme.net")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(in.Routing.Hosts) != 1 || in.Routing.Hosts[0] != "home-1.relay.example.net" || !strings.Contains(in.TXTValue, "instance=home-1;") ||
+		!strings.Contains(in.Note, "keep the TXT record") {
+		t.Fatalf("relay instructions: %+v", in)
+	}
+}

@@ -21,6 +21,7 @@ import (
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/domains"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/ids"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/network"
+	"github.com/anreddykarthikreddy3003/opendeploy/internal/relay"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/router"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/runtime"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/secrets"
@@ -87,6 +88,10 @@ type Deps struct {
 	DNS domains.Verifier
 	// TLSProbe inspects the edge certificate for a domain (tests replace it).
 	TLSProbe TLSProbe
+	// Relay reports the relay tunnel (relay ingress mode only).
+	Relay interface {
+		Status(ctx context.Context) (*relay.Status, error)
+	}
 	// InsecureNoNetworkPolicy allows deployments without egress enforcement.
 	// Only honoured in dev mode.
 	InsecureNoNetworkPolicy bool

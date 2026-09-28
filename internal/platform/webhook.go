@@ -251,9 +251,17 @@ func (p *Platform) GeneratedHostname(project, env string) string {
 	return project + "-" + env + "." + p.baseDomain()
 }
 
+// BaseDomain is the domain under which generated hostnames are allocated.
+func (p *Platform) BaseDomain() string { return p.baseDomain() }
+
 func (p *Platform) baseDomain() string {
-	if p.Node.Ingress.BaseDomain != "" {
-		return p.Node.Ingress.BaseDomain
+	in := p.Node.Ingress
+	if in.BaseDomain != "" {
+		return in.BaseDomain
+	}
+	if in.Mode == "relay" && in.Relay.InstanceID != "" && in.Relay.PublicSuffix != "" {
+		// The relay delegates <instance>.<suffix> to this node.
+		return in.Relay.InstanceID + "." + strings.Trim(in.Relay.PublicSuffix, ".")
 	}
 	return "localhost"
 }

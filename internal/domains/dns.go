@@ -41,6 +41,11 @@ type TXTResult struct {
 // value served by a cache, a lame server or only some of the zone's
 // servers is not proof.
 func (r *TXTResult) Proves(value string) (bool, string) {
+	return r.ProvesFunc(func(rec string) bool { return rec == value })
+}
+
+// ProvesFunc is Proves with a record matcher.
+func (r *TXTResult) ProvesFunc(match func(string) bool) (bool, string) {
 	auth, have := 0, 0
 	for _, s := range r.Servers {
 		if s.Error != "" || !s.Authoritative {
@@ -48,7 +53,7 @@ func (r *TXTResult) Proves(value string) (bool, string) {
 		}
 		auth++
 		for _, rec := range s.Records {
-			if rec == value {
+			if match(rec) {
 				have++
 				break
 			}

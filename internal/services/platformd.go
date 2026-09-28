@@ -17,6 +17,7 @@ import (
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/identity"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/network"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/platform"
+	"github.com/anreddykarthikreddy3003/opendeploy/internal/relay"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/store"
 )
 
@@ -73,6 +74,9 @@ func NewPlatformd(ctx context.Context, n *config.Node, log *slog.Logger, c *Clie
 	p := platform.New(platform.Deps{Store: st, Node: n, Builder: c.Builder, Runtime: c.Runtime, Router: c.Router, Artifacts: c.Artifact,
 		Secrets: c.Secrets, Audit: c.Audit, AuditReader: c.Audit, Egress: eg, GitHub: gh, Log: log,
 		InsecureNoNetworkPolicy: o.InsecureNoNetworkPolicy})
+	if n.Ingress.Mode == "relay" {
+		p.Relay = &relay.Client{C: n.IPCClient(identity.RelayAgent, identity.Platform)}
+	}
 	requireMFA := !n.DevMode
 	if o.RequireMFA != nil {
 		requireMFA = *o.RequireMFA

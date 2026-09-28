@@ -91,8 +91,9 @@ func (p *Platform) routingTargets() domains.Targets {
 	in := p.Node.Ingress
 	switch in.Mode {
 	case "relay":
-		if in.Relay.PublicSuffix != "" {
-			return domains.Targets{Hosts: []string{"edge." + strings.TrimPrefix(in.Relay.PublicSuffix, ".")}}
+		if in.Relay.PublicSuffix != "" && in.Relay.InstanceID != "" {
+			// CNAME custom domains to this instance's relay name.
+			return domains.Targets{Hosts: []string{in.Relay.InstanceID + "." + strings.Trim(in.Relay.PublicSuffix, ".")}}
 		}
 		if h, _, err := net.SplitHostPort(in.Relay.ServerAddr); err == nil {
 			return domains.Targets{Hosts: []string{h}}
@@ -153,6 +154,8 @@ func (p *Platform) instructions(d *store.Domain, inst string) *DomainInstruction
 		in.TXTValue = domains.TXTValue(inst, d.ClaimToken)
 	}
 	switch {
+	case p.Node.Ingress.Mode == "relay":
+		in.Note = "Relay mode: keep the TXT record published; the relay re-checks it to authorise this instance for the hostname."
 	case p.Node.Ingress.Mode == "lan":
 		in.Note = "LAN mode: the TXT proof is still required; point the name at this node on your local DNS."
 	case in.Routing.Empty():
