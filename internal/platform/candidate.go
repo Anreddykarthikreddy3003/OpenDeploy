@@ -27,7 +27,7 @@ func (p *Platform) ensureEnvNetwork(ctx context.Context, proj *store.Project, en
 	if err != nil {
 		return nil, fmt.Errorf("environment network: %w", err)
 	}
-	pol := network.EnvPolicy{EnvironmentID: env.ID, ProjectID: proj.ID, Kind: env.Kind, Bridge: ni.Bridge, Subnet: ni.Subnet,
+	pol := network.EnvPolicy{EnvironmentID: env.ID, ProjectID: proj.ID, Kind: env.Kind, Bridge: ni.Bridge, Subnet: ni.Subnet, Gateway: ni.Gateway,
 		Internet: cfg.Egress.Internet == nil || *cfg.Egress.Internet, AllowHosts: cfg.Egress.AllowHosts}
 	if env.Kind != "preview" && !env.PRFromFork {
 		// Private-network egress is an administrator decision recorded in the
@@ -120,6 +120,15 @@ func (p *Platform) ensureDeploymentWorkloads(ctx context.Context, d *store.Deplo
 	for k, v := range env2 {
 		envVars[k] = v
 	}
+	if cfg.Egress.Internet != nil && !*cfg.Egress.Internet && len(cfg.Egress.AllowHosts) > 0 {
+		// Allowlist-only egress goes through egressd's proxy on the gateway.
+		if ni, err := p.Runtime.EnsureNetwork(ctx, runtime.NetworkSpec{EnvironmentID: env.ID, ProjectID: proj.ID, Kind: env.Kind}); err == nil && ni.Gateway != "" {
+			proxy := "http://" + net.JoinHostPort(ni.Gateway, strconv.Itoa(p.egressProxyPort()))
+			for _, k := range []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"} {
+				envVars[k] = proxy
+			}
+		}
+	}
 	if cfg.Runtime.SecretEnv == nil || *cfg.Runtime.SecretEnv {
 		for k, v := range resolved {
 			if runtimeEnvNameOK(k) {
@@ -161,6 +170,15 @@ func (p *Platform) ensureDeploymentWorkloads(ctx context.Context, d *store.Deplo
 		}
 	}
 	return replicas, nil
+}
+
+func (p *Platform) egressProxyPort() int {
+	_, port, err := net.SplitHostPort(p.Node.Egress.ProxyListen)
+	if err != nil {
+		return 3128
+	}
+	n, _ := strconv.Atoi(port)
+	return n
 }
 
 func runtimeEnvNameOK(k string) bool {

@@ -1,0 +1,31 @@
+name: security-gate
+# Release gate (PRD §30.1): adversarial negative tests must pass on every
+# release. Tests that cannot run on a host report CAPABILITY-BLOCKED.
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  adversarial:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Tooling
+        run: sudo apt-get update && sudo apt-get install -y nftables
+      - name: containerd backend integration
+        run: sudo -E env "PATH=$PATH" OPENDEPLOY_CONTAINERD_TESTS=1 OPENDEPLOY_CONTAINERD_SOCKET=/run/containerd/containerd.sock go test -count=1 -run Containerd -v ./internal/runtime/
+      - name: Adversarial suite (ST-01..ST-12)
+        run: |
+          sudo -E env "PATH=$PATH" go test -tags adversarial -count=1 -v ./tests/adversarial/ | tee adversarial.log
+          if grep -q "CAPABILITY-BLOCKED" adversarial.log; then echo "::warning::some controls were capability-blocked on this runner"; fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: adversarial-log
+          path: adversarial.log

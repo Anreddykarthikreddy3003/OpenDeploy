@@ -34,6 +34,7 @@ type fakeBuilder struct {
 	n      int
 	delay  time.Duration
 	failOn map[string]bool
+	cron   []policy.CronJob
 }
 
 func (b *fakeBuilder) Start(ctx context.Context, r builder.Req) (*builder.Status, error) {
@@ -54,6 +55,7 @@ func (b *fakeBuilder) Status(ctx context.Context, id string, after int64) (*buil
 	}
 	cfg := policy.Default()
 	cfg.Health.Startup = &policy.ProbeConfig{Path: "/", Grace: policy.Duration{Duration: 5 * time.Second}}
+	cfg.Cron = b.cron
 	return &builder.Status{State: "succeeded", Result: &builder.Result{
 		Commit:   git.Result{SHA: strings.Repeat("a", 40)},
 		Plan:     detect.Plan{Strategy: "dockerfile", Port: 8080},
@@ -588,5 +590,51 @@ func TestLiveCorruptionEntersDegradedMode(t *testing.T) {
 	}
 	if _, err := h.s.CreateDeployment(ctx, store.NewDeployment{EnvironmentID: h.env.ID, Trigger: "manual"}); err == nil {
 		t.Fatal("write allowed in degraded mode")
+	}
+}
+
+func TestCronRuns(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	h.b.cron = []policy.CronJob{{Name: "cleanup", Schedule: "*/5 * * * *", Command: []string{"./cleanup", "--old"}}}
+	d := h.deploy()
+	h.run(d.ID)
+	due := time.Date(2026, 9, 28, 10, 5, 0, 0, time.UTC)
+	if err := h.p.RunCron(ctx, due); err != nil {
+		t.Fatal(err)
+	}
+	var cronID string
+	for id, sp := range h.rt.Specs {
+		if sp.Service == "cron-cleanup" {
+			cronID = id
+			if strings.Join(sp.Command, " ") != "./cleanup --old" || sp.Port != 0 || !sp.ReadOnlyRoot {
+				t.Fatalf("cron spec %+v", sp)
+			}
+		}
+	}
+	if cronID == "" {
+		t.Fatal("cron run not started")
+	}
+	// Same minute again: idempotent. Next due minute while still running: no overlap.
+	_ = h.p.RunCron(ctx, due)
+	_ = h.p.RunCron(ctx, due.Add(5*time.Minute))
+	count := 0
+	for _, sp := range h.rt.Specs {
+		if sp.Service == "cron-cleanup" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("cron runs = %d", count)
+	}
+	// Not due: nothing new. Finished run is reaped.
+	_ = h.rt.Stop(ctx, cronID, 0)
+	_ = h.p.RunCron(ctx, due.Add(7*time.Minute))
+	if _, err := h.rt.Inspect(ctx, cronID); err == nil {
+		t.Fatal("finished cron run not reaped")
+	}
+	w, _ := h.s.GetWorkload(ctx, cronID)
+	if w.State != "stopped" {
+		t.Fatalf("cron row %s", w.State)
 	}
 }

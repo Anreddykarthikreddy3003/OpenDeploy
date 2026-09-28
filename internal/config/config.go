@@ -137,6 +137,10 @@ type BuildConfig struct {
 
 type EgressConfig struct {
 	ProxyListen  string   `yaml:"proxy_listen"`
+	BuildBridges []string `yaml:"build_bridges"`
+	BuildUsers   []string `yaml:"build_users"` // rootless BuildKit users (output filtering)
+	DNS          []string `yaml:"dns"`
+	NftBin       string   `yaml:"nft_bin"`
 	AllowedHosts []string `yaml:"allowed_hosts"` // registries etc. for restricted builds
 	Enforce      bool     `yaml:"enforce"`
 }
@@ -249,7 +253,10 @@ func (n *Node) ApplyDefaults() {
 	def(&n.Build.PackPath, "pack")
 	def(&n.Build.NixpacksPath, "nixpacks")
 	def(&n.Build.DefaultBuilderImage, "paketobuildpacks/builder-jammy-base")
-	def(&n.Egress.ProxyListen, "10.200.0.1:3128")
+	def(&n.Egress.ProxyListen, "0.0.0.0:3128")
+	if len(n.Egress.BuildBridges) == 0 && n.Runtime.Backend == "docker" {
+		n.Egress.BuildBridges = []string{"docker0"}
+	}
 	def(&n.Backup.Schedule, "@daily")
 	def(&n.Backup.Prefix, "opendeploy/")
 	defi(&n.Backup.RetainDays, 30)

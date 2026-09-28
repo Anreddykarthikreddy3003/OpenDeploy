@@ -19,6 +19,7 @@ type EnvPolicy struct {
 	Kind          string   `json:"kind"` // production | staging | preview
 	Bridge        string   `json:"bridge"`
 	Subnet        string   `json:"subnet"`
+	Gateway       string   `json:"gateway,omitempty"`
 	Internet      bool     `json:"internet"`
 	AllowPrivate  bool     `json:"allow_private"` // explicit administrator opt-in (never for previews)
 	AllowHosts    []string `json:"allow_hosts,omitempty"`

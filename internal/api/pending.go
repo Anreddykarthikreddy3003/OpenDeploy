@@ -6,6 +6,5 @@ import "net/http"
 // volumes M3, backups/updates M7).
 func (s *Server) webauthnRoutes(pre, a func(handler) http.HandlerFunc) {}
 func (s *Server) domainRoutes(a func(handler) http.HandlerFunc)        {}
-func (s *Server) volumeRoutes(a func(handler) http.HandlerFunc)        {}
 func (s *Server) backupRoutes(a func(handler) http.HandlerFunc)        {}
 func (s *Server) updateRoutes(a func(handler) http.HandlerFunc)        {}

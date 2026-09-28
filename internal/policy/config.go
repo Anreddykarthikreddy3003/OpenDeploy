@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/anreddykarthikreddy3003/opendeploy/internal/cronexpr"
 )
 
 // MaxConfigBytes bounds the size of opendeploy.yaml read from a repository.
@@ -322,12 +324,11 @@ func (c *Config) ApplyDefaults() {
 }
 
 var (
-	nameRE      = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
-	memRE       = regexp.MustCompile(`^[0-9]+(Ki|Mi|Gi)$`)
-	branchRE    = regexp.MustCompile(`^[A-Za-z0-9._/-]{1,200}$`)
-	smokeReqRE  = regexp.MustCompile(`^(GET|HEAD|POST|PUT|DELETE|PATCH|OPTIONS) /[^\s]*$`)
-	hostRE      = regexp.MustCompile(`^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+(:[0-9]{1,5})?$`)
-	cronFieldRE = regexp.MustCompile(`^(@(hourly|daily|weekly|monthly|yearly)|([0-9*/,-]+\s+){4}[0-9*/,-]+)$`)
+	nameRE     = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+	memRE      = regexp.MustCompile(`^[0-9]+(Ki|Mi|Gi)$`)
+	branchRE   = regexp.MustCompile(`^[A-Za-z0-9._/-]{1,200}$`)
+	smokeReqRE = regexp.MustCompile(`^(GET|HEAD|POST|PUT|DELETE|PATCH|OPTIONS) /[^\s]*$`)
+	hostRE     = regexp.MustCompile(`^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+(:[0-9]{1,5})?$`)
 )
 
 // KnownCapabilities is the closed set of special capabilities that an
@@ -505,8 +506,8 @@ func (c *Config) Validate() error {
 		if !nameRE.MatchString(j.Name) {
 			add("cron name %q invalid", j.Name)
 		}
-		if !cronFieldRE.MatchString(strings.TrimSpace(j.Schedule)) {
-			add("cron %q schedule invalid", j.Name)
+		if _, err := cronexpr.Parse(j.Schedule); err != nil {
+			add("cron %q schedule invalid: %v", j.Name, err)
 		}
 		if len(j.Command) == 0 {
 			add("cron %q requires a command", j.Name)

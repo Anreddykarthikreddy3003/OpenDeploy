@@ -30,6 +30,8 @@ func (p *Platform) reconcileLoop(ctx context.Context) {
 	defer gc.Stop()
 	integrity := time.NewTicker(5 * time.Minute)
 	defer integrity.Stop()
+	cronT := time.NewTicker(time.Minute)
+	defer cronT.Stop()
 	p.snapshotIfDue(ctx)
 	for {
 		select {
@@ -45,6 +47,12 @@ func (p *Platform) reconcileLoop(ctx context.Context) {
 			p.snapshotIfDue(ctx)
 		case <-integrity.C:
 			p.CheckIntegrity(ctx)
+		case t := <-cronT.C:
+			if p.Store.DB.Degraded() == "" {
+				if err := p.RunCron(ctx, t); err != nil {
+					p.Log.Warn("cron", "err", err)
+				}
+			}
 		}
 	}
 }
