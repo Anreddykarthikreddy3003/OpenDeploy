@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"context"
 	"crypto/subtle"
 	"net"
@@ -181,7 +182,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) error {
 	}
 	_ = s.S.ResetLoginFailures(r.Context(), u.ID)
 	needsMFA := u.TOTPEnabled || u.WebAuthnCount > 0
-	sess, err := s.newSession(w, r, u, !needsMFA)
+	// A session is MFA-complete only when no second factor is enrolled AND
+	// none is required for the role; otherwise the user must verify (or
+	// enroll) before anything but the MFA endpoints works.
+	sess, err := s.newSession(w, r, u, !needsMFA && !s.mfaMandatory(u))
 	if err != nil {
 		return err
 	}
@@ -256,9 +260,10 @@ func (s *Server) handleReauth(w http.ResponseWriter, r *http.Request) error {
 		return errf(429, "rate_limited", "too many attempts")
 	}
 	var req struct {
-		Password     string `json:"password"`
-		Code         string `json:"code"`
-		RecoveryCode string `json:"recovery_code"`
+		Password     string          `json:"password"`
+		Code         string          `json:"code"`
+		RecoveryCode string          `json:"recovery_code"`
+		WebAuthn     json.RawMessage `json:"webauthn"`
 	}
 	if err := decode(r, &req); err != nil {
 		return err
@@ -267,10 +272,17 @@ func (s *Server) handleReauth(w http.ResponseWriter, r *http.Request) error {
 		s.audit(r, "auth.reauth", "user", p.User.ID, "", audit.Denied, map[string]string{"reason": "password"})
 		return errf(401, "invalid_credentials", "incorrect password")
 	}
-	if p.User.TOTPEnabled {
-		if _, ok := s.verifySecondFactor(r, p.User, req.Code, req.RecoveryCode); !ok {
+	if p.User.TOTPEnabled || p.User.WebAuthnCount > 0 {
+		ok := false
+		switch {
+		case len(req.WebAuthn) > 0 && p.User.WebAuthnCount > 0:
+			ok = s.finishWebAuthnLogin(r, p, req.WebAuthn) == nil
+		case p.User.TOTPEnabled || req.RecoveryCode != "":
+			_, ok = s.verifySecondFactor(r, p.User, req.Code, req.RecoveryCode)
+		}
+		if !ok {
 			s.audit(r, "auth.reauth", "user", p.User.ID, "", audit.Denied, map[string]string{"reason": "second factor"})
-			return errf(401, "invalid_code", "invalid verification code")
+			return errf(401, "invalid_code", "second factor verification failed")
 		}
 	}
 	if err := s.S.MarkReauth(r.Context(), p.Session.ID); err != nil {

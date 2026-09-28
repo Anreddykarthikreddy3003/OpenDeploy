@@ -1,6 +1,7 @@
 package builder
 
 import (
+	"archive/tar"
 	"context"
 	"errors"
 	"fmt"
@@ -75,14 +76,14 @@ func (s *SandboxedBuildKit) Build(ctx context.Context, sp Spec, log io.Writer) e
 	defer func() {
 		_ = s.docker(context.Background(), io.Discard, io.Discard, "rm", "-f", name)
 	}()
-	if err := s.docker(ctx, log, nil, "exec", name, "mkdir", "-p", "/home/user/ctx", "/home/user/df"); err != nil {
-		return err
-	}
-	if err := s.docker(ctx, log, nil, "cp", sp.ContextDir+"/.", name+":/home/user/ctx"); err != nil {
-		return fmt.Errorf("copy context: %w", err)
-	}
-	if err := s.docker(ctx, log, nil, "cp", filepath.Join(sp.DockerfileDir, sp.Dockerfile), name+":/home/user/df/Dockerfile"); err != nil {
-		return fmt.Errorf("copy dockerfile: %w", err)
+	// Stream the context in as a tar over exec stdin: works for every
+	// runtime (gVisor keeps its rootfs overlay inside the sandbox, so
+	// host-side `docker cp` cannot see it) and never follows symlinks.
+	pr, pw := io.Pipe()
+	go func() { pw.CloseWithError(writeBuildTar(pw, sp)) }()
+	if err := s.dockerIn(ctx, log, pr, "exec", "-i", name, "tar", "-x", "-f", "-", "-C", "/home/user"); err != nil {
+		pr.CloseWithError(err)
+		return fmt.Errorf("copy build context: %w", err)
 	}
 	args := []string{"exec", "-e", "BUILDKITD_FLAGS=--oci-worker-no-process-sandbox", name, "buildctl-daemonless.sh", "build",
 		"--progress", "plain", "--frontend", "dockerfile.v0",
@@ -132,4 +133,81 @@ func (l *limitedWriter) Write(p []byte) (int, error) {
 	}
 	l.n -= int64(len(p))
 	return l.w.Write(p)
+}
+
+// dockerIn runs docker with stdin.
+func (s *SandboxedBuildKit) dockerIn(ctx context.Context, log io.Writer, stdin io.Reader, args ...string) error {
+	bin := firstNonEmpty(s.Docker, "docker")
+	cmd := exec.CommandContext(ctx, bin, args...)
+	var env []string
+	if s.Host != "" {
+		env = append(env, "DOCKER_HOST="+s.Host)
+	}
+	cmd.Env = minimalEnv(env)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, log, log
+	return cmd.Run()
+}
+
+// writeBuildTar writes ctx/... (the build context, symlinks preserved as
+// links, special files skipped) and df/Dockerfile.
+func writeBuildTar(w io.Writer, sp Spec) error {
+	tw := tar.NewWriter(w)
+	err := filepath.Walk(sp.ContextDir, func(p string, fi os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(sp.ContextDir, p)
+		if err != nil {
+			return err
+		}
+		link := ""
+		switch {
+		case fi.Mode()&os.ModeSymlink != 0:
+			if link, err = os.Readlink(p); err != nil {
+				return err
+			}
+		case fi.IsDir(), fi.Mode().IsRegular():
+		default:
+			return nil // devices, sockets, fifos
+		}
+		h, err := tar.FileInfoHeader(fi, link)
+		if err != nil {
+			return err
+		}
+		h.Name = filepath.ToSlash(filepath.Join("ctx", rel))
+		if fi.IsDir() {
+			h.Name += "/"
+		}
+		h.Uid, h.Gid, h.Uname, h.Gname = 1000, 1000, "", ""
+		if err := tw.WriteHeader(h); err != nil {
+			return err
+		}
+		if fi.Mode().IsRegular() {
+			f, err := os.Open(p)
+			if err != nil {
+				return err
+			}
+			_, err = io.Copy(tw, f)
+			f.Close()
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	df, err := os.ReadFile(filepath.Join(sp.DockerfileDir, sp.Dockerfile))
+	if err != nil {
+		return err
+	}
+	if err := tw.WriteHeader(&tar.Header{Name: "df/", Typeflag: tar.TypeDir, Mode: 0o755, Uid: 1000, Gid: 1000}); err != nil {
+		return err
+	}
+	if err := tw.WriteHeader(&tar.Header{Name: "df/Dockerfile", Mode: 0o644, Size: int64(len(df)), Uid: 1000, Gid: 1000}); err != nil {
+		return err
+	}
+	if _, err := tw.Write(df); err != nil {
+		return err
+	}
+	return tw.Close()
 }

@@ -48,6 +48,9 @@ type Options struct {
 	UI       fs.FS
 	Profile  string
 	Mutate   func(n *config.Node)
+	// RequireMFA enforces MFA for owner/admin roles (production default;
+	// off by default in the harness).
+	RequireMFA bool
 }
 
 // Stack is a running all-in-one deployment.
@@ -230,7 +233,7 @@ func Start(ctx context.Context, o Options) (*Stack, error) {
 	if eg == nil {
 		eg, insecure = network.Nop{}, true
 	}
-	mfa := false
+	mfa := o.RequireMFA
 	pd, err := services.NewPlatformd(sctx, n, o.Log, services.NewClients(n, identity.Platform),
 		services.PlatformOptions{UI: o.UI, Egress: eg, InsecureNoNetworkPolicy: insecure, RequireMFA: &mfa})
 	if err != nil {
