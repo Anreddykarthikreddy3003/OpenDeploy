@@ -1,0 +1,9 @@
+/bin/
+/dist/
+/web/node_modules/
+/web/dist/
+*.test
+*.out
+coverage.*
+/.tmp/
+/tests/e2e/.artifacts/
