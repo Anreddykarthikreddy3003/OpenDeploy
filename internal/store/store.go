@@ -17,6 +17,10 @@ import (
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
 
+// SchemaVersion is the latest platform schema migration (recorded in
+// backup manifests so restore tooling can refuse incompatible downgrades).
+const SchemaVersion = 1
+
 // Migrations returns the embedded platform migrations.
 func Migrations() fs.FS {
 	sub, err := fs.Sub(migrationsFS, "migrations")

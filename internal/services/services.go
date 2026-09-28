@@ -67,6 +67,7 @@ func Auditd(ctx context.Context, n *config.Node, ids *ipc.IdentityMap, log *slog
 	}
 	srv := ipc.NewServer(identity.Audit, ids, log)
 	audit.Register(srv, st)
+	audit.RegisterBackup(srv, st, n.BackupStagingDir())
 	return srv, st, nil
 }
 
@@ -81,7 +82,9 @@ func Secretd(ctx context.Context, n *config.Node, ids *ipc.IdentityMap, log *slo
 		return nil, nil, err
 	}
 	srv := ipc.NewServer(identity.Secret, ids, log)
-	secrets.Register(srv, &secrets.Service{Store: st, Audit: sink})
+	ssvc := &secrets.Service{Store: st, Audit: sink}
+	secrets.Register(srv, ssvc)
+	secrets.RegisterBackup(srv, ssvc, n.BackupStagingDir())
 	return srv, st, nil
 }
 
@@ -121,6 +124,7 @@ func Artifactd(n *config.Node, ids *ipc.IdentityMap, log *slog.Logger, sink audi
 	svc := &artifact.Service{Store: st, Registry: reg, RegistryURL: n.Artifact.RegistryListen, HandoffDir: n.HandoffDir(), Audit: sink}
 	srv := ipc.NewServer(identity.Artifact, ids, log)
 	artifact.Register(srv, svc)
+	artifact.RegisterBackup(srv, st, n.BackupStagingDir())
 	hs := &http.Server{Addr: n.Artifact.RegistryListen, Handler: reg, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second}
 	return srv, hs, nil
 }
@@ -225,6 +229,7 @@ func Runtimed(n *config.Node, ids *ipc.IdentityMap, log *slog.Logger, sink audit
 	svc := &runtime.Service{Backend: be, Registry: n.Artifact.RegistryListen, Auth: authFn, Audit: sink}
 	srv := ipc.NewServer(identity.Runtime, ids, log)
 	runtime.Register(srv, svc)
+	runtime.RegisterBackup(srv, n.Runtime.VolumesDir, n.BackupStagingDir())
 	return srv, svc, nil
 }
 

@@ -55,6 +55,7 @@ func init() {
 		{"domains", "list|add|verify PROJECT|DOMAIN [HOST] [--env NAME]", "manage custom domains", cmdDomains},
 		{"plan", "[DIR]", "show how a local directory would be built (offline detection)", cmdPlan},
 		{"admin", "bootstrap-token [--config PATH]", "print the one-time owner bootstrap token (run on the node)", cmdAdmin},
+		{"restore", "[--from DIR] [--id ID|latest] --master-key FILE [--signer B64] [--list] [--force]", "restore a node from an encrypted backup (services stopped)", cmdRestore},
 		{"doctor", "", "check host capabilities for OpenDeploy", cmdDoctor},
 		{"dev", "[--port 8080] [--data DIR]", "run a single-process development node with the dashboard", cmdDev},
 		{"version", "", "print the version", func(context.Context, []string) error { fmt.Println("opendeployctl", Version); return nil }},

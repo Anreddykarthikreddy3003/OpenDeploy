@@ -178,6 +178,11 @@ type BackupConfig struct {
 	ObjectLock bool   `yaml:"object_lock"`
 	RetainDays int    `yaml:"retain_days"`
 	LocalDir   string `yaml:"local_dir"`
+	// IncludeArtifacts backs up retained build artifacts so rollbacks work
+	// after a restore without rebuilding (default true).
+	IncludeArtifacts *bool `yaml:"include_artifacts"`
+	// SignerPublicKey pins the Ed25519 key expected on manifests at restore.
+	SignerPublicKey string `yaml:"signer_public_key"`
 }
 
 type UpdateConfig struct {
@@ -389,6 +394,10 @@ func (n *Node) HandoffDir() string { return filepath.Join(n.DataDir, "handoff") 
 
 // ServiceDir returns the private state directory for a service identity.
 func (n *Node) ServiceDir(id string) string { return filepath.Join(n.DataDir, id) }
+
+// BackupStagingDir receives per-service exports during a backup (group
+// writable by the service accounts, read by platformd).
+func (n *Node) BackupStagingDir() string { return filepath.Join(n.DataDir, "backup-staging") }
 
 // IdentityMap resolves each service identity's Unix user to its UID.
 func (n *Node) IdentityMap() (*ipc.IdentityMap, error) {

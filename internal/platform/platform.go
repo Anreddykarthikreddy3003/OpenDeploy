@@ -88,6 +88,8 @@ type Deps struct {
 	DNS domains.Verifier
 	// TLSProbe inspects the edge certificate for a domain (tests replace it).
 	TLSProbe TLSProbe
+	// Backups exports per-service state for backups.
+	Backups BackupExporters
 	// Relay reports the relay tunnel (relay ingress mode only).
 	Relay interface {
 		Status(ctx context.Context) (*relay.Status, error)

@@ -101,7 +101,7 @@ func (p *Platform) startCronRun(ctx context.Context, env *store.Environment, d *
 	if err != nil {
 		return err
 	}
-	spec := runtime.Spec{ID: w.ID, ProjectID: proj.ID, EnvironmentID: env.ID, DeploymentID: d.ID, Service: svc, Kind: "app", Image: art.ImageRef,
+	spec := runtime.Spec{ID: w.ID, ProjectID: proj.ID, EnvironmentID: env.ID, DeploymentID: d.ID, Service: svc, Kind: "app", Image: p.imageRef(art),
 		Runtime: d.RuntimeClass, Command: job.Command, Env: envVars, SecretFiles: resolved, MemoryBytes: mem, CPU: s.Config.Resources.CPU,
 		PIDs: s.Config.Resources.PIDs, ReadOnlyRoot: s.Config.Runtime.ReadOnlyRoot == nil || *s.Config.Runtime.ReadOnlyRoot,
 		Tmpfs: s.Plan.Tmpfs, Volumes: mounts, Network: env.ID, Capabilities: decisionCaps(s)}

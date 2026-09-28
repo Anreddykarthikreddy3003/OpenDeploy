@@ -653,3 +653,21 @@ func (s *Store) ListBackups(ctx context.Context, limit int) ([]*Backup, error) {
 func (s *Store) GetBackup(ctx context.Context, id string) (*Backup, error) {
 	return scanBackup(s.DB.R().QueryRowContext(ctx, `SELECT `+bkCols+` FROM backups WHERE id=?`, id))
 }
+
+// BackupVolumes lists active volumes whose policy includes them in backups.
+func (s *Store) BackupVolumes(ctx context.Context) ([]string, error) {
+	rows, err := s.DB.R().QueryContext(ctx, `SELECT id FROM volumes WHERE status='active' AND backup_policy<>'none' ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}

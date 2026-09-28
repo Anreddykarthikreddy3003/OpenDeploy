@@ -74,6 +74,7 @@ func NewPlatformd(ctx context.Context, n *config.Node, log *slog.Logger, c *Clie
 	p := platform.New(platform.Deps{Store: st, Node: n, Builder: c.Builder, Runtime: c.Runtime, Router: c.Router, Artifacts: c.Artifact,
 		Secrets: c.Secrets, Audit: c.Audit, AuditReader: c.Audit, Egress: eg, GitHub: gh, Log: log,
 		InsecureNoNetworkPolicy: o.InsecureNoNetworkPolicy})
+	p.Backups = backupExporters{c}
 	if n.Ingress.Mode == "relay" {
 		p.Relay = &relay.Client{C: n.IPCClient(identity.RelayAgent, identity.Platform)}
 	}

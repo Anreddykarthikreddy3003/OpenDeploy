@@ -197,6 +197,7 @@ func Start(ctx context.Context, o Options) (*Stack, error) {
 			}}
 		rsrv = ipc.NewServer(identity.Runtime, ids, o.Log)
 		runtime.Register(rsrv, rsvc)
+		runtime.RegisterBackup(rsrv, n.Runtime.VolumesDir, n.BackupStagingDir())
 	} else {
 		rsrv, _, err = services.Runtimed(n, ids, o.Log, sink(identity.Runtime), artForRuntime)
 		if err != nil {

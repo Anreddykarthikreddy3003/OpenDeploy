@@ -53,6 +53,7 @@ func (p *Platform) reconcileLoop(ctx context.Context) {
 				if err := p.RunCron(ctx, t); err != nil {
 					p.Log.Warn("cron", "err", err)
 				}
+				p.scheduleBackup(ctx, t)
 			}
 		}
 	}

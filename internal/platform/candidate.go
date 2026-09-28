@@ -148,7 +148,7 @@ func (p *Platform) ensureDeploymentWorkloads(ctx context.Context, d *store.Deplo
 			continue
 		}
 		spec := runtime.Spec{ID: w.ID, ProjectID: proj.ID, EnvironmentID: env.ID, DeploymentID: d.ID, Service: "web", Kind: "app",
-			Image: art.ImageRef, Runtime: d.RuntimeClass, Command: cfg.Runtime.Command, Env: envVars, SecretFiles: resolved,
+			Image: p.imageRef(art), Runtime: d.RuntimeClass, Command: cfg.Runtime.Command, Env: envVars, SecretFiles: resolved,
 			Port: port, MemoryBytes: mem, CPU: cfg.Resources.CPU, PIDs: cfg.Resources.PIDs,
 			ReadOnlyRoot: cfg.Runtime.ReadOnlyRoot == nil || *cfg.Runtime.ReadOnlyRoot,
 			Tmpfs:        append(append([]string{}, cfg.Runtime.TmpfsPaths...), s.Plan.Tmpfs...), Volumes: mounts, Network: env.ID,
@@ -551,4 +551,17 @@ func (p *Platform) httpProbe(ctx context.Context, endpoint, method, path string)
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	return resp.StatusCode, string(b), nil
+}
+
+// imageRef addresses an artifact through this node's registry. Stored refs
+// embed the registry address at build time; after a restore (or a
+// registry port change) the content digest still identifies the image.
+func (p *Platform) imageRef(art *store.Artifact) string {
+	ref := art.ImageRef
+	if reg := p.Node.Artifact.RegistryListen; reg != "" {
+		if _, rest, ok := strings.Cut(ref, "/"); ok {
+			return reg + "/" + rest
+		}
+	}
+	return ref
 }

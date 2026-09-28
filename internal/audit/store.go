@@ -179,6 +179,9 @@ type VerifyResult struct {
 	BrokenAt int64  `json:"broken_at,omitempty"`
 	// CheckpointsVerified counts signed checkpoints consistent with the chain.
 	CheckpointsVerified int `json:"checkpoints_verified"`
+	// CheckpointsForeign are chain-consistent checkpoints signed by a key
+	// this node does not hold (previous node identity).
+	CheckpointsForeign int `json:"checkpoints_foreign,omitempty"`
 }
 
 // Verify walks the full chain and all checkpoints.
@@ -228,7 +231,13 @@ func (s *Store) Verify(ctx context.Context) (VerifyResult, error) {
 			res.OK, res.BrokenAt = false, c.Seq
 			return res, nil
 		}
-		if pub != nil && c.KeyID == KeyID(pub) && !VerifyCheckpoint(c, pub) {
+		if pub == nil || c.KeyID != KeyID(pub) {
+			// Signed by another key (e.g. before a restore to a new node):
+			// consistent with the chain, but not verifiable here.
+			res.CheckpointsForeign++
+			continue
+		}
+		if !VerifyCheckpoint(c, pub) {
 			res.OK, res.BrokenAt = false, c.Seq
 			return res, nil
 		}
