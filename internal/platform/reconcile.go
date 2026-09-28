@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/artifact"
+	"github.com/anreddykarthikreddy3003/opendeploy/internal/audit"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/model"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/router"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/runtime"
@@ -25,6 +28,9 @@ func (p *Platform) reconcileLoop(ctx context.Context) {
 	defer t.Stop()
 	gc := time.NewTicker(time.Hour)
 	defer gc.Stop()
+	integrity := time.NewTicker(5 * time.Minute)
+	defer integrity.Stop()
+	p.snapshotIfDue(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -36,7 +42,56 @@ func (p *Platform) reconcileLoop(ctx context.Context) {
 		case <-gc.C:
 			p.garbageCollect(ctx)
 			_ = p.Store.PurgeSessions(ctx)
+			p.snapshotIfDue(ctx)
+		case <-integrity.C:
+			p.CheckIntegrity(ctx)
 		}
+	}
+}
+
+// CheckIntegrity re-runs SQLite and cross-row invariant checks; violations
+// that could delete, reattach or misroute resources put the platform into
+// degraded read-only mode (PRD §16.1).
+func (p *Platform) CheckIntegrity(ctx context.Context) []string {
+	problems, err := p.Store.DB.Check(ctx, store.Invariants()...)
+	if err != nil {
+		problems = append(problems, "integrity check error: "+err.Error())
+	}
+	if len(problems) > 0 && p.Store.DB.Degraded() == "" {
+		p.Store.DB.EnterDegraded(strings.Join(problems, "; "))
+		_, _ = p.Audit.Append(ctx, audit.Event{ActorType: audit.ActorService, ActorID: "platformd", Action: "state.degraded",
+			ResourceType: "database", Result: audit.Failure, Details: map[string]string{"reason": truncate(strings.Join(problems, "; "), 1000)}})
+	}
+	return problems
+}
+
+// snapshotIfDue keeps rolling daily checksummed snapshots (last 7).
+func (p *Platform) snapshotIfDue(ctx context.Context) {
+	dir := filepath.Join(p.Node.ServiceDir("platformd"), "snapshots")
+	entries, _ := os.ReadDir(dir)
+	var snaps []string
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), "-daily.db") {
+			snaps = append(snaps, e.Name())
+		}
+	}
+	sort.Strings(snaps)
+	if len(snaps) > 0 {
+		if fi, err := os.Stat(filepath.Join(dir, snaps[len(snaps)-1])); err == nil && time.Since(fi.ModTime()) < 23*time.Hour {
+			return
+		}
+	}
+	if p.Store.DB.Degraded() != "" {
+		return
+	}
+	if _, err := p.Store.DB.Snapshot(ctx, dir, "daily"); err != nil {
+		p.Log.Warn("daily snapshot failed", "err", err)
+		return
+	}
+	for len(snaps) >= 7 {
+		_ = os.Remove(filepath.Join(dir, snaps[0]))
+		_ = os.Remove(filepath.Join(dir, snaps[0]+".sha256"))
+		snaps = snaps[1:]
 	}
 }
 
