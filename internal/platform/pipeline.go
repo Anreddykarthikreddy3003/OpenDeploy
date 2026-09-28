@@ -87,7 +87,7 @@ func (p *Platform) dispatch(ctx context.Context, job *store.Job) error {
 		if err := json.Unmarshal(job.Payload, &pl); err != nil {
 			return &PermanentError{err}
 		}
-		return p.checkDomainTLS(ctx, pl.DomainID)
+		return p.checkDomainTLS(ctx, job, pl.DomainID)
 	case JobBackup:
 		return p.runBackupJob(ctx, job)
 	}

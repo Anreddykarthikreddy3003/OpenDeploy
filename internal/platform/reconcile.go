@@ -45,6 +45,7 @@ func (p *Platform) reconcileLoop(ctx context.Context) {
 			p.garbageCollect(ctx)
 			_ = p.Store.PurgeSessions(ctx)
 			p.snapshotIfDue(ctx)
+			p.domainMaintenance(ctx, time.Now())
 		case <-integrity.C:
 			p.CheckIntegrity(ctx)
 		case t := <-cronT.C:

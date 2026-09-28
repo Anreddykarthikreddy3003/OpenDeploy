@@ -25,6 +25,7 @@ import (
 
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/allinone"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/build/builder"
+	"github.com/anreddykarthikreddy3003/opendeploy/internal/domains"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/git"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/git/github"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/runtime"
@@ -456,6 +457,57 @@ func TestFullStack(t *testing.T) {
 		}
 	}
 
+	// ---- custom domains: fresh TXT proof, routing only after proof, detach
+	dnsv := &staticDNS{txt: map[string][]string{}}
+	s.P.Platform.DNS = dnsv
+	var claim struct {
+		ID           string `json:"id"`
+		Hostname     string `json:"hostname"`
+		Status       string `json:"status"`
+		Instructions struct {
+			TXTName  string `json:"txt_name"`
+			TXTValue string `json:"txt_value"`
+		} `json:"instructions"`
+	}
+	if code := c.do("POST", "/api/v2/projects/"+created.Project.ID+"/domains", map[string]string{"hostname": "*.shop.acme.net"}, nil); code != 400 {
+		t.Fatalf("wildcard claim: %d", code)
+	}
+	if code := c.do("POST", "/api/v2/projects/"+created.Project.ID+"/domains", map[string]string{"hostname": "Shop.Acme.NET"}, &claim); code != 201 {
+		t.Fatalf("claim: %d", code)
+	}
+	if claim.Hostname != "shop.acme.net" || claim.Status != "pending" || !strings.HasPrefix(claim.Instructions.TXTValue, "opendeploy-claim=v1;") {
+		t.Fatalf("claim response: %+v", claim)
+	}
+	if code := c.do("POST", "/api/v2/domains/"+claim.ID+"/verify", nil, nil); code != 422 {
+		t.Fatalf("verify without TXT: %d", code)
+	}
+	if strings.Contains(caddyServers(t, s.Node.Ingress.CaddyAdmin), "shop.acme.net") {
+		t.Fatal("unverified domain reached the edge")
+	}
+	dnsv.set(claim.Instructions.TXTName, claim.Instructions.TXTValue)
+	if code := c.do("POST", "/api/v2/domains/"+claim.ID+"/verify", nil, nil); code != 200 {
+		t.Fatalf("verify: %d", code)
+	}
+	if !strings.Contains(caddyServers(t, s.Node.Ingress.CaddyAdmin), "shop.acme.net") {
+		t.Fatal("verified domain not routed")
+	}
+	if code := c.do("POST", "/api/v2/projects/"+gp.ID+"/domains", map[string]string{"hostname": "shop.acme.net"}, nil); code != 409 {
+		t.Fatalf("second project claimed an active domain: %d", code)
+	}
+	if code := c.do("DELETE", "/api/v2/domains/"+claim.ID, nil, nil); code != 200 {
+		t.Fatalf("detach: %d", code)
+	}
+	if strings.Contains(caddyServers(t, s.Node.Ingress.CaddyAdmin), "shop.acme.net") {
+		t.Fatal("detached domain still routed")
+	}
+	var reclaim struct {
+		ID string `json:"id"`
+	}
+	c.do("POST", "/api/v2/projects/"+gp.ID+"/domains", map[string]string{"hostname": "shop.acme.net"}, &reclaim)
+	if code := c.do("POST", "/api/v2/domains/"+reclaim.ID+"/verify", nil, nil); code != 422 {
+		t.Fatalf("re-claim verified with the previous owner's stale TXT: %d", code)
+	}
+
 	// ---- RBAC: a viewer cannot deploy and cannot see other projects
 	c.do("POST", "/api/v2/users", map[string]string{"email": "v@example.com", "password": "viewer password 1", "role": "viewer"}, nil)
 	c.do("PUT", "/api/v2/projects/"+created.Project.ID+"/members", map[string]string{"email": "v@example.com", "role": "viewer"}, nil)
@@ -466,6 +518,12 @@ func TestFullStack(t *testing.T) {
 	}
 	if code := v.do("GET", "/api/v2/projects/"+gp.ID, nil, nil); code != 404 {
 		t.Fatalf("viewer saw non-member project: %d", code)
+	}
+	if code := v.do("POST", "/api/v2/projects/"+created.Project.ID+"/domains", map[string]string{"hostname": "x.acme.net"}, nil); code != 403 {
+		t.Fatalf("viewer claimed a domain: %d", code)
+	}
+	if code := v.do("DELETE", "/api/v2/domains/"+reclaim.ID, nil, nil); code != 404 {
+		t.Fatalf("viewer saw another project's domain: %d", code)
 	}
 	if code := v.do("GET", "/api/v2/projects/"+created.Project.ID+"/secrets", nil, nil); code != 403 {
 		t.Fatalf("viewer listed secrets: %d", code)
@@ -504,4 +562,26 @@ func caddyServers(t *testing.T, sock string) string {
 	defer res.Body.Close()
 	b, _ := io.ReadAll(res.Body)
 	return string(b)
+}
+
+// staticDNS serves claim TXT records as every authoritative server would.
+type staticDNS struct {
+	mu  sync.Mutex
+	txt map[string][]string
+}
+
+func (d *staticDNS) set(name string, v ...string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.txt[name] = v
+}
+
+func (d *staticDNS) TXT(_ context.Context, name string) (*domains.TXTResult, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return &domains.TXTResult{Name: name, Zone: "acme.net", Servers: []domains.ServerAnswer{{Server: "198.51.100.1:53", Authoritative: true, Records: d.txt[name]}}}, nil
+}
+
+func (d *staticDNS) Resolve(_ context.Context, host string) (*domains.Resolution, error) {
+	return &domains.Resolution{Host: host}, nil
 }

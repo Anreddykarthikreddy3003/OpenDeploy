@@ -18,6 +18,7 @@ import (
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/audit"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/build/builder"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/config"
+	"github.com/anreddykarthikreddy3003/opendeploy/internal/domains"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/ids"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/network"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/router"
@@ -81,8 +82,11 @@ type Deps struct {
 	Log         *slog.Logger
 	// HealthClient probes workloads; tests may replace it.
 	HealthClient *http.Client
-	// DNS resolves domain claims (tests replace it).
-	DNS DNSResolver
+	// DNS verifies domain claims against authoritative servers (tests
+	// replace it).
+	DNS domains.Verifier
+	// TLSProbe inspects the edge certificate for a domain (tests replace it).
+	TLSProbe TLSProbe
 	// InsecureNoNetworkPolicy allows deployments without egress enforcement.
 	// Only honoured in dev mode.
 	InsecureNoNetworkPolicy bool
@@ -116,7 +120,7 @@ func New(d Deps) *Platform {
 		d.Egress = network.Nop{}
 	}
 	if d.DNS == nil {
-		d.DNS = &netDNS{server: d.Node.Ingress.DNSResolver}
+		d.DNS = domains.NewResolver(d.Node.Ingress.DNSResolver)
 	}
 	host, _ := os.Hostname()
 	return &Platform{Deps: d, Events: NewBus(), nodeID: "node_" + host, workerID: ids.New("wrk")}

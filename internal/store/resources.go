@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/ids"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/state"
@@ -294,6 +295,29 @@ func (s *Store) TombstoneDomain(ctx context.Context, id string) error {
 		}
 		return nil
 	})
+}
+
+// ExpireDomainClaims marks pending claims past their expiry as expired and
+// clears their tokens so they can never be accepted.
+func (s *Store) ExpireDomainClaims(ctx context.Context, now time.Time) (int, error) {
+	var n int64
+	err := s.DB.Tx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, `UPDATE domains SET status='expired', claim_token='', updated_at=? WHERE status='pending' AND claim_expires_at<>'' AND claim_expires_at<=?`,
+			state.Now(), state.FormatTime(now))
+		if err != nil {
+			return err
+		}
+		n, _ = res.RowsAffected()
+		return nil
+	})
+	return int(n), err
+}
+
+// CountProjectDomains counts a project's pending and attached domains.
+func (s *Store) CountProjectDomains(ctx context.Context, projectID string) (int, error) {
+	var n int
+	err := s.DB.R().QueryRowContext(ctx, `SELECT COUNT(*) FROM domains WHERE project_id=? AND status IN ('pending','verified','active')`, projectID).Scan(&n)
+	return n, err
 }
 
 // TombstoneProjectDomains detaches all domains of a project.
