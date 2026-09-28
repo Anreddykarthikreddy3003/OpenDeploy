@@ -159,8 +159,12 @@ func Builderd(n *config.Node, ids *ipc.IdentityMap, log *slog.Logger, sink audit
 		trusted = &builder.Buildctl{Addr: n.Build.BuildKitAddr}
 	}
 	var untrusted builder.Executor
-	if n.Build.UntrustedBuildKit != "" {
+	switch {
+	case n.Build.UntrustedBuildKit != "":
 		untrusted = &builder.Buildctl{Addr: n.Build.UntrustedBuildKit}
+	case n.Build.UntrustedRuntime != "" && n.Runtime.Backend == "docker":
+		untrusted = &builder.SandboxedBuildKit{Host: n.Runtime.DockerHost, Image: n.Build.UntrustedImage, Runtime: n.Build.UntrustedRuntime,
+			Network: n.Build.UntrustedNetwork}
 	}
 	for _, d := range []string{n.Build.WorkDir, filepath.Join(n.DataDir, "sources")} {
 		if err := os.MkdirAll(d, 0o750); err != nil {

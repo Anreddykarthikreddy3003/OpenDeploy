@@ -123,9 +123,15 @@ type RuntimeConfig struct {
 type BuildConfig struct {
 	// Executor is buildkit (rootless buildkitd via buildctl, default) or
 	// docker (the Docker Engine's BuildKit; dev/CI adapter).
-	Executor            string `yaml:"executor"`
-	BuildKitAddr        string `yaml:"buildkit_addr"`
-	UntrustedBuildKit   string `yaml:"untrusted_buildkit_addr"`
+	Executor          string `yaml:"executor"`
+	BuildKitAddr      string `yaml:"buildkit_addr"`
+	UntrustedBuildKit string `yaml:"untrusted_buildkit_addr"`
+	// UntrustedRuntime enables disposable sandboxed BuildKit containers on
+	// Docker-engine nodes (e.g. "runsc"). Empty = untrusted builds fail closed
+	// unless untrusted_buildkit_addr points at an operator-run sandbox.
+	UntrustedRuntime    string `yaml:"untrusted_runtime"`
+	UntrustedImage      string `yaml:"untrusted_image"`
+	UntrustedNetwork    string `yaml:"untrusted_network"`
 	WorkDir             string `yaml:"work_dir"`
 	CacheDir            string `yaml:"cache_dir"`
 	MaxConcurrent       int    `yaml:"max_concurrent"`
@@ -252,6 +258,7 @@ func (n *Node) ApplyDefaults() {
 	def(&n.Build.CacheDir, filepath.Join(n.DataDir, "build-cache"))
 	def(&n.Build.PackPath, "pack")
 	def(&n.Build.NixpacksPath, "nixpacks")
+	def(&n.Build.UntrustedImage, "moby/buildkit:v0.24.0-rootless")
 	def(&n.Build.DefaultBuilderImage, "paketobuildpacks/builder-jammy-base")
 	def(&n.Egress.ProxyListen, "0.0.0.0:3128")
 	if len(n.Egress.BuildBridges) == 0 && n.Runtime.Backend == "docker" {

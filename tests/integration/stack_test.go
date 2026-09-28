@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -292,7 +293,18 @@ func TestFullStack(t *testing.T) {
 	// ---- GitHub webhook: signature, dedupe, ordering
 	key, _ := rsa.GenerateKey(rand.Reader, 2048)
 	secret := []byte("whsec")
+	var checkMu sync.Mutex
+	var checkRuns []map[string]any
 	ghAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/check-runs") {
+			var cr map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&cr)
+			checkMu.Lock()
+			checkRuns = append(checkRuns, cr)
+			checkMu.Unlock()
+			w.WriteHeader(201)
+			return
+		}
 		if r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/access_tokens") {
 			_ = json.NewEncoder(w).Encode(map[string]any{"token": "ghs_test", "expires_at": time.Now().Add(time.Hour)})
 			return
@@ -305,7 +317,7 @@ func TestFullStack(t *testing.T) {
 	if err := s.P.Store.UpsertGitConnection(ctx, conn); err != nil {
 		t.Fatal(err)
 	}
-	gp := &store.Project{Name: "gh", GitConnectionID: conn.ID, RepoID: 555, RepoFullName: "acme/gh", CloneURL: "https://140.82.112.3/acme/gh.git", AutoDeploy: true}
+	gp := &store.Project{Name: "gh", GitConnectionID: conn.ID, RepoID: 555, RepoFullName: "acme/gh", CloneURL: "https://140.82.112.3/acme/gh.git", AutoDeploy: true, PreviewsEnabled: true}
 	if err := s.P.Store.CreateProject(ctx, gp); err != nil {
 		t.Fatal(err)
 	}
@@ -349,6 +361,101 @@ func TestFullStack(t *testing.T) {
 		t.Fatalf("older push overwrote newer generation: current=%s newest=%s", genv.CurrentDeploymentID, newest)
 	}
 
+	// ---- pull request previews: same-repo PR deploys; fork PRs are gated
+	sendPR := func(delivery string, number int, headRepo int64, sha string) map[string]any {
+		t.Helper()
+		body, _ := json.Marshal(map[string]any{"action": "opened", "number": number,
+			"pull_request": map[string]any{"number": number, "state": "open", "title": "change",
+				"head": map[string]any{"ref": "feature", "sha": sha, "repo": map[string]any{"id": headRepo, "full_name": "someone/gh"}},
+				"base": map[string]any{"ref": "main", "sha": strings.Repeat("0", 40), "repo": map[string]any{"id": 555, "full_name": "acme/gh"}},
+				"user": map[string]any{"login": "contributor"}},
+			"repository": map[string]any{"id": 555, "full_name": "acme/gh"}, "installation": map[string]any{"id": 77}})
+		req, _ := http.NewRequest("POST", base+"/webhooks/github", bytes.NewReader(body))
+		req.Header.Set("X-GitHub-Event", "pull_request")
+		req.Header.Set("X-GitHub-Delivery", delivery)
+		req.Header.Set("X-Hub-Signature-256", github.Sign(secret, body))
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		var out map[string]any
+		_ = json.NewDecoder(res.Body).Decode(&out)
+		if res.StatusCode != 202 {
+			t.Fatalf("pull_request webhook %d %v", res.StatusCode, out)
+		}
+		return out
+	}
+	deps := func(r map[string]any) []any { l, _ := r["deployments"].([]any); return l }
+	// Preview protection is applied to the edge for preview hosts only.
+	if code := c.do("PUT", "/api/v2/projects/"+gp.ID+"/preview-protection", map[string]any{"enabled": true, "user": "team", "password": "short"}, nil); code != 400 {
+		t.Fatalf("weak preview password accepted: %d", code)
+	}
+	if code := c.do("PUT", "/api/v2/projects/"+gp.ID+"/preview-protection", map[string]any{"enabled": true, "user": "team", "password": "preview-pass-1"}, nil); code != 200 {
+		t.Fatalf("preview protection: %d", code)
+	}
+	pr := sendPR("44444444-4444-4444-4444-444444444444", 7, 555, strings.Repeat("c", 40))
+	if len(deps(pr)) != 1 {
+		t.Fatalf("same-repo PR: %v", pr)
+	}
+	pd := waitStatus(t, c, deps(pr)[0].(string), "SUCCEEDED")
+	if pd["trust_class"] != "trusted" {
+		t.Fatalf("same-repo preview trust class: %v", pd["trust_class"])
+	}
+	edge := caddyServers(t, s.Node.Ingress.CaddyAdmin)
+	if !strings.Contains(edge, "gh-pr-7.") || !strings.Contains(edge, "http_basic") || strings.Count(edge, "http_basic") != 1 {
+		t.Fatalf("preview route/basic auth not applied exactly once to the preview host:\n%s", edge)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		checkMu.Lock()
+		n := len(checkRuns)
+		var last map[string]any
+		if n > 0 {
+			last = checkRuns[n-1]
+		}
+		checkMu.Unlock()
+		if last != nil && last["head_sha"] == strings.Repeat("c", 40) && last["conclusion"] == "success" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no successful check run for the preview: %v", last)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	// Fork PR with forks disabled: no environment, no deployment, no build.
+	builds = ex.builds.Load()
+	fr := sendPR("55555555-5555-5555-5555-555555555555", 8, 999, strings.Repeat("d", 40))
+	if len(deps(fr)) != 0 || !strings.Contains(fr["outcome"].(string), "fork PR previews disabled") {
+		t.Fatalf("fork PR executed while disabled: %v", fr)
+	}
+	if _, err := s.P.Store.GetEnvironmentByName(ctx, gp.ID, "pr-8"); err == nil {
+		t.Fatal("fork PR created an environment while disabled")
+	}
+	// Forks allowed but no untrusted sandbox (no runsc): fails closed before
+	// any fork code is fetched or built.
+	allow := true
+	if err := s.P.Store.UpdateProject(ctx, gp.ID, store.ProjectUpdate{AllowPublicForks: &allow}); err != nil {
+		t.Fatal(err)
+	}
+	fr = sendPR("66666666-6666-6666-6666-666666666666", 9, 999, strings.Repeat("e", 40))
+	if len(deps(fr)) != 1 {
+		t.Fatalf("allowed fork PR not queued: %v", fr)
+	}
+	fd := waitStatus(t, c, deps(fr)[0].(string), "FAILED")
+	t.Logf("fork deployment failed closed: %v", fd["error"])
+	if msg, _ := fd["error"].(string); !strings.Contains(strings.ToLower(msg), "sandbox") && !strings.Contains(strings.ToLower(msg), "gvisor") {
+		t.Fatalf("fork failure should name the missing sandbox: %q", msg)
+	}
+	if ex.builds.Load() != builds {
+		t.Fatal("fork code was built without an untrusted sandbox")
+	}
+	for _, sp := range fake.Specs {
+		if sp.DeploymentID == deps(fr)[0].(string) {
+			t.Fatal("fork workload started without a sandbox")
+		}
+	}
+
 	// ---- RBAC: a viewer cannot deploy and cannot see other projects
 	c.do("POST", "/api/v2/users", map[string]string{"email": "v@example.com", "password": "viewer password 1", "role": "viewer"}, nil)
 	c.do("PUT", "/api/v2/projects/"+created.Project.ID+"/members", map[string]string{"email": "v@example.com", "role": "viewer"}, nil)
@@ -381,4 +488,20 @@ func TestFullStack(t *testing.T) {
 	if denied == 0 {
 		t.Fatal("forged webhook not audited")
 	}
+}
+
+// caddyServers returns the HTTP servers config currently loaded into the
+// (fake) Caddy admin API.
+func caddyServers(t *testing.T, sock string) string {
+	t.Helper()
+	hc := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", sock)
+	}}}
+	res, err := hc.Get("http://caddy/config/apps/http/servers")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	b, _ := io.ReadAll(res.Body)
+	return string(b)
 }

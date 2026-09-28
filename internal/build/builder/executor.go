@@ -77,13 +77,13 @@ func (b *Buildctl) Build(ctx context.Context, s Spec, log io.Writer) error {
 		args = append(args, "--opt", "build-arg:"+k+"="+s.BuildArgs[k])
 	}
 	for _, k := range sortedKeys(s.Secrets) {
-		args = append(args, "--secret", "id="+k+",src="+s.Secrets[k])
+		args = append(args, "--secret", "id="+k+","+csvField("src="+s.Secrets[k]))
 	}
 	switch s.Output {
 	case OutputOCI:
-		args = append(args, "--output", "type=oci,dest="+s.Dest)
+		args = append(args, "--output", "type=oci,"+csvField("dest="+s.Dest))
 	case OutputTar:
-		args = append(args, "--output", "type=tar,dest="+s.Dest)
+		args = append(args, "--output", "type=tar,"+csvField("dest="+s.Dest))
 	default:
 		return fmt.Errorf("unknown output %q", s.Output)
 	}
@@ -120,13 +120,13 @@ func (d *DockerBuildx) Build(ctx context.Context, s Spec, log io.Writer) error {
 		args = append(args, "--build-arg", k+"="+s.BuildArgs[k])
 	}
 	for _, k := range sortedKeys(s.Secrets) {
-		args = append(args, "--secret", "id="+k+",src="+s.Secrets[k])
+		args = append(args, "--secret", "id="+k+","+csvField("src="+s.Secrets[k]))
 	}
 	switch s.Output {
 	case OutputOCI:
-		args = append(args, "--output", "type=oci,dest="+s.Dest)
+		args = append(args, "--output", "type=oci,"+csvField("dest="+s.Dest))
 	case OutputTar:
-		args = append(args, "--output", "type=tar,dest="+s.Dest)
+		args = append(args, "--output", "type=tar,"+csvField("dest="+s.Dest))
 	default:
 		return fmt.Errorf("unknown output %q", s.Output)
 	}
@@ -136,6 +136,15 @@ func (d *DockerBuildx) Build(ctx context.Context, s Spec, log io.Writer) error {
 		env = append(env, "DOCKER_HOST="+d.Host)
 	}
 	return run(ctx, bin, args, minimalEnv(env), log)
+}
+
+// csvField quotes a key=value pair for BuildKit's CSV-parsed flags
+// (--output, --secret) so paths containing commas or quotes stay intact.
+func csvField(kv string) string {
+	if !strings.ContainsAny(kv, ",\"\r\n") {
+		return kv
+	}
+	return `"` + strings.ReplaceAll(kv, `"`, `""`) + `"`
 }
 
 func sortedKeys(m map[string]string) []string {

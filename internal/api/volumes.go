@@ -13,6 +13,8 @@ func (s *Server) volumeRoutes(a func(handler) http.HandlerFunc) {
 	s.mux.HandleFunc("PATCH /api/v2/projects/{id}/volumes/{vol}", a(s.handleVolumeProtection))
 	s.mux.HandleFunc("DELETE /api/v2/projects/{id}/volumes/{vol}", a(s.handleDeleteVolume))
 	s.mux.HandleFunc("GET /api/v2/projects/{id}/services", a(s.handleServices))
+	s.mux.HandleFunc("GET /api/v2/projects/{id}/preview-protection", a(s.handleGetPreviewProtection))
+	s.mux.HandleFunc("PUT /api/v2/projects/{id}/preview-protection", a(s.handleSetPreviewProtection))
 }
 
 func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request) error {

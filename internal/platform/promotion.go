@@ -115,6 +115,7 @@ func (p *Platform) finishDrain(ctx context.Context, pi *store.PromotionIntent) e
 	p.Events.Publish(Event{Topic: "project:" + d.ProjectID, Type: "status", Data: map[string]string{"deployment_id": d.ID, "status": string(model.StatusSucceeded)}})
 	p.logf(ctx, d.ID, "deploy", "deployment is live (generation %d)", d.Generation)
 	p.auditDeploy(ctx, d, "deployment.promote", audit.Success, map[string]string{"from": pi.FromDeployment, "to": d.ID})
+	go p.notifyGitHub(context.Background(), d, true)
 	return nil
 }
 

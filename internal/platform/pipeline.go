@@ -441,6 +441,7 @@ func (p *Platform) failDeployment(ctx context.Context, d *store.Deployment, caus
 	p.Events.Publish(Event{Topic: "deployment:" + d.ID, Type: "status", Data: map[string]string{"to": string(model.StatusFailed), "message": msg}})
 	p.Events.Publish(Event{Topic: "project:" + d.ProjectID, Type: "status", Data: map[string]string{"deployment_id": d.ID, "status": string(model.StatusFailed)}})
 	p.auditDeploy(ctx, d, "deployment.fail", audit.Failure, map[string]string{"reason": truncate(msg, 500)})
+	go p.notifyGitHub(context.Background(), d, false)
 	env, err := p.Store.GetEnvironment(ctx, d.EnvironmentID)
 	if err == nil && env.CurrentDeploymentID != d.ID {
 		p.cleanupCandidate(ctx, d.ID)
