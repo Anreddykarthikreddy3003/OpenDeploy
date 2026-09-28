@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"time"
 
@@ -151,7 +152,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) error {
 	err = s.S.Tx(r.Context(), func(tx *sql.Tx) error {
 		var err error
 		d, err = store.CreateDeploymentTx(r.Context(), tx, store.NewDeployment{EnvironmentID: env.ID, Trigger: "manual", CreatedBy: p.User.ID,
-			CommitMessage: "uploaded source (" + strconv.FormatInt(n>>10, 10) + " KiB)"})
+			CommitMessage: "uploaded source (" + humanBytes(n) + ")"})
 		if err != nil {
 			return err
 		}
@@ -389,12 +390,23 @@ func (s *Server) handleRuntimeLogs(w http.ResponseWriter, r *http.Request) error
 	if _, err := s.requireProject(r, env.ProjectID, auth.LogsRead); err != nil {
 		return err
 	}
-	if env.CurrentDeploymentID == "" {
+	depID := env.CurrentDeploymentID
+	if q := r.URL.Query().Get("deployment"); q != "" {
+		d, err := s.S.GetDeployment(r.Context(), q)
+		if err != nil || d.EnvironmentID != env.ID {
+			return errNotFound
+		}
+		depID = d.ID
+	}
+	if depID == "" {
 		writeJSON(w, 200, []any{})
 		return nil
 	}
 	tail, _ := strconv.Atoi(r.URL.Query().Get("tail"))
-	ws, err := s.S.WorkloadsForDeployment(r.Context(), env.CurrentDeploymentID)
+	if tail <= 0 || tail > 2000 {
+		tail = 200
+	}
+	ws, err := s.S.WorkloadsForDeployment(r.Context(), depID)
 	if err != nil {
 		return err
 	}
@@ -412,9 +424,10 @@ func (s *Server) handleRuntimeLogs(w http.ResponseWriter, r *http.Request) error
 			continue
 		}
 		for _, l := range lines {
-			out = append(out, line{Workload: wk.ID, Replica: wk.Replica, Time: l.Time, Stream: l.Stream, Text: l.Text})
+			out = append(out, line{Workload: wk.ServiceName, Replica: wk.Replica, Time: l.Time, Stream: l.Stream, Text: l.Text})
 		}
 	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Time < out[j].Time })
 	writeJSON(w, 200, out)
 	return nil
 }
@@ -428,4 +441,14 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	res := s.P.HandleGitHubWebhook(r.Context(), r.Header.Get("X-GitHub-Event"), r.Header.Get("X-GitHub-Delivery"),
 		r.Header.Get("X-Hub-Signature-256"), s.clientIP(r), body)
 	writeJSON(w, res.Status, res)
+}
+
+func humanBytes(n int64) string {
+	switch {
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MiB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.1f KiB", float64(n)/(1<<10))
+	}
+	return fmt.Sprintf("%d bytes", n)
 }

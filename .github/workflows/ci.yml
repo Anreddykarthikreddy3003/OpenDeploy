@@ -6,7 +6,25 @@ on:
 permissions:
   contents: read
 jobs:
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: install
+        run: cd web && npm ci
+      - name: typecheck, test, build
+        run: cd web && npm test && npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
   go:
+    needs: web
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,5 +37,9 @@ jobs:
         run: go vet ./...
       - name: test
         run: go test -race -count=1 ./...
-      - name: build
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+      - name: build (dashboard embedded)
         run: make build

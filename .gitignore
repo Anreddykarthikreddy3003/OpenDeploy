@@ -8,3 +8,4 @@
 coverage.*
 /.tmp/
 /tests/e2e/.artifacts/
+/web/*.tsbuildinfo

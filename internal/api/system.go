@@ -9,6 +9,7 @@ import (
 
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/audit"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/auth"
+	"github.com/anreddykarthikreddy3003/opendeploy/internal/store"
 )
 
 func (s *Server) handleSystemStatus(w http.ResponseWriter, r *http.Request) error {
@@ -108,6 +109,21 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	writeJSON(w, 200, jobs)
+	return nil
+}
+
+func (s *Server) handleBreakers(w http.ResponseWriter, r *http.Request) error {
+	if err := s.requireNode(r, auth.NodeSettings); err != nil {
+		return err
+	}
+	bs, err := s.S.ListBreakers(r.Context())
+	if err != nil {
+		return err
+	}
+	if bs == nil {
+		bs = []store.Breaker{}
+	}
+	writeJSON(w, 200, bs)
 	return nil
 }
 
@@ -240,6 +256,7 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /api/v2/system/audit", a(s.handleAudit))
 	m.HandleFunc("GET /api/v2/system/audit/verify", a(s.handleAuditVerify))
 	m.HandleFunc("GET /api/v2/system/jobs", a(s.handleJobs))
+	m.HandleFunc("GET /api/v2/system/breakers", a(s.handleBreakers))
 	m.HandleFunc("DELETE /api/v2/system/breakers/{key}", a(s.handleResetBreaker))
 
 	m.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {

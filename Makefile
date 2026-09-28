@@ -1,7 +1,7 @@
 # OpenDeploy build entry points.
 GO        ?= go
 VERSION   ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-LDFLAGS   := -s -w -X github.com/anreddykarthikreddy3003/opendeploy/internal/daemon.Version=$(VERSION)
+LDFLAGS   := -s -w -X github.com/anreddykarthikreddy3003/opendeploy/internal/daemon.Version=$(VERSION) -X github.com/anreddykarthikreddy3003/opendeploy/internal/cli.Version=$(VERSION) -X main.version=$(VERSION)
 BIN       := bin
 CMDS      := $(notdir $(wildcard cmd/*)) relay-server
 
