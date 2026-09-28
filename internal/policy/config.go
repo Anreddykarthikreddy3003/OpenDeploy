@@ -131,6 +131,10 @@ type RuntimeConfig struct {
 	Capabilities []string     `yaml:"capabilities" json:"capabilities"`
 	Replicas     int          `yaml:"replicas,omitempty" json:"replicas,omitempty"`
 	TmpfsPaths   []string     `yaml:"tmpfs,omitempty" json:"tmpfs,omitempty"`
+	// SecretEnv also exposes secrets as environment variables (compatibility
+	// mode, default true). Secrets are always mounted as files under
+	// /run/secrets; set false for file-only injection (PRD §13.1).
+	SecretEnv *bool `yaml:"secret_env" json:"secret_env"`
 }
 
 type HealthConfig struct {
@@ -268,6 +272,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.Runtime.ReadOnlyRoot == nil {
 		c.Runtime.ReadOnlyRoot = boolp(true)
+	}
+	if c.Runtime.SecretEnv == nil {
+		c.Runtime.SecretEnv = boolp(true)
 	}
 	if c.Runtime.Replicas == 0 {
 		c.Runtime.Replicas = 1

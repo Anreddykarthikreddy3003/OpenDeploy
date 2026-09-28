@@ -121,6 +121,9 @@ type RuntimeConfig struct {
 }
 
 type BuildConfig struct {
+	// Executor is buildkit (rootless buildkitd via buildctl, default) or
+	// docker (the Docker Engine's BuildKit; dev/CI adapter).
+	Executor            string `yaml:"executor"`
 	BuildKitAddr        string `yaml:"buildkit_addr"`
 	UntrustedBuildKit   string `yaml:"untrusted_buildkit_addr"`
 	WorkDir             string `yaml:"work_dir"`
@@ -234,6 +237,12 @@ func (n *Node) ApplyDefaults() {
 	def(&n.Runtime.RunscHandler, "io.containerd.runsc.v1")
 	def(&n.Runtime.VMHandler, "io.containerd.kata.v2")
 	def(&n.Runtime.VolumesDir, filepath.Join(n.DataDir, "volumes"))
+	if n.Build.Executor == "" {
+		n.Build.Executor = "buildkit"
+		if n.Runtime.Backend == "docker" {
+			n.Build.Executor = "docker"
+		}
+	}
 	def(&n.Build.BuildKitAddr, "unix://"+filepath.Join(n.RunDir, "buildkit", "buildkitd.sock"))
 	def(&n.Build.WorkDir, filepath.Join(n.DataDir, "build"))
 	def(&n.Build.CacheDir, filepath.Join(n.DataDir, "build-cache"))
@@ -278,6 +287,11 @@ func (n *Node) Validate() error {
 	case "lan", "direct", "relay":
 	default:
 		p = append(p, "ingress.mode must be lan|direct|relay")
+	}
+	switch n.Build.Executor {
+	case "buildkit", "docker":
+	default:
+		p = append(p, "build.executor must be buildkit|docker")
 	}
 	switch n.Runtime.Backend {
 	case "containerd", "docker":

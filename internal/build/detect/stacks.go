@@ -279,7 +279,7 @@ func renderNode(p *Plan, prefix, install, start string, hasYarnDir bool) string 
 	if p.PackageManager == "yarn" && hasYarnDir {
 		b.WriteString("COPY .yarn ./.yarn\n")
 	}
-	fmt.Fprintf(&b, "RUN --mount=type=cache,target=/root/.npm --mount=type=cache,target=/root/.cache %s\n\n", install)
+	fmt.Fprintf(&b, "RUN --mount=type=cache,target=/root/.npm --mount=type=cache,target=/root/.cache %s && mkdir -p node_modules\n\n", install)
 	fmt.Fprintf(&b, "FROM %s AS build\nWORKDIR /app\nCOPY --from=deps /app/node_modules ./node_modules\nCOPY . .\n", img)
 	if p.BuildCommand != "" {
 		fmt.Fprintf(&b, "RUN %s\n", p.BuildCommand)

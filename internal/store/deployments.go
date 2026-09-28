@@ -188,78 +188,84 @@ type NewDeployment struct {
 func (s *Store) CreateDeployment(ctx context.Context, nd NewDeployment) (*Deployment, error) {
 	var out *Deployment
 	err := s.DB.Tx(ctx, func(tx *sql.Tx) error {
-		var projectID, envStatus string
-		var gen int64
-		if err := tx.QueryRowContext(ctx, `SELECT project_id, desired_generation, status FROM environments WHERE id=?`, nd.EnvironmentID).
-			Scan(&projectID, &gen, &envStatus); err != nil {
-			return notFound(err)
-		}
-		if envStatus != "active" {
-			return fmt.Errorf("%w: environment is %s", ErrConflict, envStatus)
-		}
-		gen++
-		now := state.Now()
-		d := &Deployment{
-			ID: ids.New("dep"), ProjectID: projectID, EnvironmentID: nd.EnvironmentID, Generation: gen, Trigger: nd.Trigger,
-			CommitSHA: nd.CommitSHA, CommitMessage: truncate(nd.CommitMessage, 1000), CommitAuthor: truncate(nd.CommitAuthor, 200), Branch: nd.Branch,
-			DeliveryID: nd.DeliveryID, RollbackOf: nd.RollbackOf, Status: model.StatusReceived, ArtifactID: nd.ArtifactID,
-			CreatedBy: nd.CreatedBy, CreatedAt: now, UpdatedAt: now, BuildInputs: json.RawMessage("{}"), ConfigSnapshot: json.RawMessage("{}"),
-			DecisionReasons: []string{},
-		}
-		var art any
-		if d.ArtifactID != "" {
-			var ap string
-			if err := tx.QueryRowContext(ctx, `SELECT project_id FROM artifacts WHERE id=?`, d.ArtifactID).Scan(&ap); err != nil {
-				return fmt.Errorf("artifact: %w", notFound(err))
-			}
-			if ap != projectID {
-				return fmt.Errorf("%w: artifact belongs to another project", ErrConflict)
-			}
-			art = d.ArtifactID
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE environments SET desired_generation=?, desired_deployment_id=?, updated_at=? WHERE id=? AND desired_generation=?`,
-			gen, d.ID, now, nd.EnvironmentID, gen-1); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO deployments(id,project_id,environment_id,generation,trigger,commit_sha,commit_message,commit_author,
-			branch,delivery_id,rollback_of,status,artifact_id,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			d.ID, projectID, d.EnvironmentID, gen, d.Trigger, d.CommitSHA, d.CommitMessage, d.CommitAuthor, d.Branch, d.DeliveryID,
-			d.RollbackOf, d.Status, art, d.CreatedBy, now, now); err != nil {
-			return err
-		}
-		if err := addEvent(ctx, tx, d.ID, "", string(model.StatusReceived), "deployment requested ("+d.Trigger+")"); err != nil {
-			return err
-		}
-		// Supersede older deployments that have not yet switched the router.
-		rows, err := tx.QueryContext(ctx, `SELECT id,status FROM deployments WHERE environment_id=? AND generation<? AND status IN (`+
-			quoteList(preSwitchStates())+`)`, nd.EnvironmentID, gen)
-		if err != nil {
-			return err
-		}
-		type old struct{ id, st string }
-		var olds []old
-		for rows.Next() {
-			var o old
-			if err := rows.Scan(&o.id, &o.st); err != nil {
-				rows.Close()
-				return err
-			}
-			olds = append(olds, o)
-		}
-		rows.Close()
-		for _, o := range olds {
-			if _, err := tx.ExecContext(ctx, `UPDATE deployments SET status=?, updated_at=?, finished_at=? WHERE id=?`,
-				model.StatusSuperseded, now, now, o.id); err != nil {
-				return err
-			}
-			if err := addEvent(ctx, tx, o.id, o.st, string(model.StatusSuperseded), fmt.Sprintf("superseded by generation %d", gen)); err != nil {
-				return err
-			}
-		}
-		out = d
-		return nil
+		var err error
+		out, err = CreateDeploymentTx(ctx, tx, nd)
+		return err
 	})
 	return out, err
+}
+
+// CreateDeploymentTx is CreateDeployment inside an existing transaction.
+func CreateDeploymentTx(ctx context.Context, tx *sql.Tx, nd NewDeployment) (*Deployment, error) {
+	var projectID, envStatus string
+	var gen int64
+	if err := tx.QueryRowContext(ctx, `SELECT project_id, desired_generation, status FROM environments WHERE id=?`, nd.EnvironmentID).
+		Scan(&projectID, &gen, &envStatus); err != nil {
+		return nil, notFound(err)
+	}
+	if envStatus != "active" {
+		return nil, fmt.Errorf("%w: environment is %s", ErrConflict, envStatus)
+	}
+	gen++
+	now := state.Now()
+	d := &Deployment{
+		ID: ids.New("dep"), ProjectID: projectID, EnvironmentID: nd.EnvironmentID, Generation: gen, Trigger: nd.Trigger,
+		CommitSHA: nd.CommitSHA, CommitMessage: truncate(nd.CommitMessage, 1000), CommitAuthor: truncate(nd.CommitAuthor, 200), Branch: nd.Branch,
+		DeliveryID: nd.DeliveryID, RollbackOf: nd.RollbackOf, Status: model.StatusReceived, ArtifactID: nd.ArtifactID,
+		CreatedBy: nd.CreatedBy, CreatedAt: now, UpdatedAt: now, BuildInputs: json.RawMessage("{}"), ConfigSnapshot: json.RawMessage("{}"),
+		DecisionReasons: []string{},
+	}
+	var art any
+	if d.ArtifactID != "" {
+		var ap string
+		if err := tx.QueryRowContext(ctx, `SELECT project_id FROM artifacts WHERE id=?`, d.ArtifactID).Scan(&ap); err != nil {
+			return nil, fmt.Errorf("artifact: %w", notFound(err))
+		}
+		if ap != projectID {
+			return nil, fmt.Errorf("%w: artifact belongs to another project", ErrConflict)
+		}
+		art = d.ArtifactID
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE environments SET desired_generation=?, desired_deployment_id=?, updated_at=? WHERE id=? AND desired_generation=?`,
+		gen, d.ID, now, nd.EnvironmentID, gen-1); err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO deployments(id,project_id,environment_id,generation,trigger,commit_sha,commit_message,commit_author,
+		branch,delivery_id,rollback_of,status,artifact_id,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		d.ID, projectID, d.EnvironmentID, gen, d.Trigger, d.CommitSHA, d.CommitMessage, d.CommitAuthor, d.Branch, d.DeliveryID,
+		d.RollbackOf, d.Status, art, d.CreatedBy, now, now); err != nil {
+		return nil, err
+	}
+	if err := addEvent(ctx, tx, d.ID, "", string(model.StatusReceived), "deployment requested ("+d.Trigger+")"); err != nil {
+		return nil, err
+	}
+	// Supersede older deployments that have not yet switched the router.
+	rows, err := tx.QueryContext(ctx, `SELECT id,status FROM deployments WHERE environment_id=? AND generation<? AND status IN (`+
+		quoteList(preSwitchStates())+`)`, nd.EnvironmentID, gen)
+	if err != nil {
+		return nil, err
+	}
+	type old struct{ id, st string }
+	var olds []old
+	for rows.Next() {
+		var o old
+		if err := rows.Scan(&o.id, &o.st); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		olds = append(olds, o)
+	}
+	rows.Close()
+	for _, o := range olds {
+		if _, err := tx.ExecContext(ctx, `UPDATE deployments SET status=?, updated_at=?, finished_at=? WHERE id=?`,
+			model.StatusSuperseded, now, now, o.id); err != nil {
+			return nil, err
+		}
+		if err := addEvent(ctx, tx, o.id, o.st, string(model.StatusSuperseded), fmt.Sprintf("superseded by generation %d", gen)); err != nil {
+			return nil, err
+		}
+	}
+	return d, nil
 }
 
 func preSwitchStates() []string {

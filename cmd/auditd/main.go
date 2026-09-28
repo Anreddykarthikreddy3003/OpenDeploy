@@ -2,14 +2,13 @@
 package main
 
 import (
-	"path/filepath"
 	"time"
 
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/audit"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/config"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/daemon"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/identity"
-	"github.com/anreddykarthikreddy3003/opendeploy/internal/ipc"
+	"github.com/anreddykarthikreddy3003/opendeploy/internal/services"
 )
 
 func main() {
@@ -18,12 +17,7 @@ func main() {
 		daemon.Fatal(nil, err)
 	}
 	defer env.Cancel()
-	dir := env.Node.ServiceDir(identity.Audit)
-	key, err := daemon.LoadOrCreateEd25519(filepath.Join(dir, "checkpoint.key"))
-	if err != nil {
-		daemon.Fatal(env.Log, err)
-	}
-	st, err := audit.OpenStore(env.Ctx, filepath.Join(dir, "audit.db"), key, env.Log)
+	srv, st, err := services.Auditd(env.Ctx, env.Node, env.IDs, env.Log)
 	if err != nil {
 		daemon.Fatal(env.Log, err)
 	}
@@ -53,9 +47,6 @@ func main() {
 			}
 		}
 	}()
-	srv := ipc.NewServer(identity.Audit, env.IDs, env.Log)
-	audit.Register(srv, st)
-	// Socket is group-accessible so control-plane users in group od-audit can append.
 	if err := env.Serve(srv, 0o660); err != nil {
 		daemon.Fatal(env.Log, err)
 	}
