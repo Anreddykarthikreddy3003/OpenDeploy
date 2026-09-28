@@ -139,6 +139,9 @@ type BuildConfig struct {
 	NixpacksPath        string `yaml:"nixpacks_path"`
 	Registry            string `yaml:"registry"`
 	DefaultBuilderImage string `yaml:"default_builder_image"`
+	// CABundle is an extra PEM bundle (enterprise TLS inspection proxies)
+	// trusted by OpenDeploy-managed builders for registry access.
+	CABundle string `yaml:"ca_bundle"`
 }
 
 type EgressConfig struct {

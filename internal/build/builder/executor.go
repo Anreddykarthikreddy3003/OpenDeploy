@@ -10,9 +10,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -96,16 +98,133 @@ func (b *Buildctl) Build(ctx context.Context, s Spec, log io.Writer) error {
 type DockerBuildx struct {
 	Bin  string
 	Host string // DOCKER_HOST
+	// Builder names the buildx builder; empty selects automatically: the
+	// engine's embedded BuildKit when it uses the containerd image store
+	// (which can export OCI/tar), otherwise a dedicated docker-container
+	// builder named "opendeploy" (created on first use).
+	Builder string
+	// CABundle is an extra PEM bundle the dedicated builder trusts for
+	// registries (TLS-inspecting enterprise proxies).
+	CABundle string
+	// Mirrors are registry mirrors for docker.io (mirroring the engine's).
+	Mirrors []string
+
+	mu       sync.Mutex
+	resolved string
 }
 
 func (d *DockerBuildx) Name() string { return "docker-buildx" }
+
+// dedicatedBuilder is the buildx builder OpenDeploy manages on engines
+// whose embedded BuildKit cannot export OCI layouts.
+const dedicatedBuilder = "opendeploy"
+
+func (d *DockerBuildx) env() []string {
+	if d.Host != "" {
+		return minimalEnv([]string{"DOCKER_HOST=" + d.Host})
+	}
+	return minimalEnv(nil)
+}
+
+func (d *DockerBuildx) builder(ctx context.Context, bin string, log io.Writer) (string, error) {
+	if d.Builder != "" {
+		return d.Builder, nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.resolved != "" {
+		return d.resolved, nil
+	}
+	info := exec.CommandContext(ctx, bin, "info", "--format", "{{json .DriverStatus}}")
+	info.Env = d.env()
+	out, err := info.Output()
+	if os.Getenv("OPENDEPLOY_BUILDX_DEDICATED") == "1" {
+		err = errors.New("dedicated builder forced")
+	}
+	if err == nil && strings.Contains(string(out), "io.containerd.snapshotter") {
+		d.resolved = "default"
+		return d.resolved, nil
+	}
+	chk := exec.CommandContext(ctx, bin, "buildx", "inspect", dedicatedBuilder)
+	chk.Env = d.env()
+	if chk.Run() != nil {
+		fmt.Fprintln(log, "==> creating dedicated buildx builder (engine image store cannot export OCI layouts)")
+		args := []string{"buildx", "create", "--name", dedicatedBuilder, "--driver", "docker-container", "--bootstrap"}
+		if cfg, err := d.buildkitdConfig(); err != nil {
+			return "", err
+		} else if cfg != "" {
+			defer os.Remove(cfg)
+			args = append(args, "--buildkitd-config", cfg)
+		}
+		if err := run(ctx, bin, args, d.env(), log); err != nil {
+			return "", fmt.Errorf("create buildx builder: %w", err)
+		}
+	}
+	d.resolved = dedicatedBuilder
+	return d.resolved, nil
+}
+
+// commonRegistries receive the extra CA bundle (BuildKit trust is scoped
+// per registry host).
+var commonRegistries = []string{"docker.io", "registry-1.docker.io", "ghcr.io", "gcr.io", "mirror.gcr.io", "quay.io", "registry.k8s.io",
+	"public.ecr.aws", "mcr.microsoft.com", "registry.gitlab.com"}
+
+// buildkitdConfig renders a buildkitd.toml for the dedicated builder, or ""
+// when no customisation is needed. buildx copies referenced CA files into
+// the builder container.
+func (d *DockerBuildx) buildkitdConfig() (string, error) {
+	if d.CABundle == "" {
+		d.CABundle = os.Getenv("OPENDEPLOY_BUILD_CA_BUNDLE")
+	}
+	if d.CABundle == "" && len(d.Mirrors) == 0 {
+		return "", nil
+	}
+	var b strings.Builder
+	hosts := append([]string{}, commonRegistries...)
+	for _, m := range d.Mirrors {
+		if u, err := url.Parse(m); err == nil && u.Host != "" {
+			hosts = append(hosts, u.Host)
+		}
+	}
+	seen := map[string]bool{}
+	for _, h := range hosts {
+		if seen[h] {
+			continue
+		}
+		seen[h] = true
+		fmt.Fprintf(&b, "[registry.%q]\n", h)
+		if h == "docker.io" && len(d.Mirrors) > 0 {
+			var ms []string
+			for _, m := range d.Mirrors {
+				if u, err := url.Parse(m); err == nil && u.Host != "" {
+					ms = append(ms, strconv.Quote(u.Host))
+				}
+			}
+			fmt.Fprintf(&b, "  mirrors = [%s]\n", strings.Join(ms, ", "))
+		}
+		if d.CABundle != "" {
+			fmt.Fprintf(&b, "  ca = [%q]\n", d.CABundle)
+		}
+	}
+	f, err := os.CreateTemp("", "buildkitd-*.toml")
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	_, err = f.WriteString(b.String())
+	return f.Name(), err
+}
 
 func (d *DockerBuildx) Build(ctx context.Context, s Spec, log io.Writer) error {
 	bin := d.Bin
 	if bin == "" {
 		bin = "docker"
 	}
-	args := []string{"buildx", "build", "--progress", "plain", "--pull=false",
+	bld, err := d.builder(ctx, bin, log)
+	if err != nil {
+		return err
+	}
+	args := []string{"buildx", "--builder", bld, "build", "--progress", "plain", "--pull=false",
 		"-f", s.DockerfileDir + "/" + s.Dockerfile}
 	if s.Target != "" {
 		args = append(args, "--target", s.Target)
@@ -131,11 +250,7 @@ func (d *DockerBuildx) Build(ctx context.Context, s Spec, log io.Writer) error {
 		return fmt.Errorf("unknown output %q", s.Output)
 	}
 	args = append(args, s.ContextDir)
-	env := []string{}
-	if d.Host != "" {
-		env = append(env, "DOCKER_HOST="+d.Host)
-	}
-	return run(ctx, bin, args, minimalEnv(env), log)
+	return run(ctx, bin, args, d.env(), log)
 }
 
 // csvField quotes a key=value pair for BuildKit's CSV-parsed flags

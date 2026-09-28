@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/artifact"
+	"github.com/anreddykarthikreddy3003/opendeploy/internal/build/builder"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/config"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/ids"
 )
@@ -34,8 +35,9 @@ func TestContainerdIntegration(t *testing.T) {
 	_ = os.MkdirAll(src, 0o755)
 	_ = os.WriteFile(filepath.Join(src, "Dockerfile"), []byte("FROM alpine:3.20\nUSER 10001\nCMD [\"sh\",\"-c\",\"echo started; while true; do printf 'HTTP/1.1 200 OK\\\\r\\\\nContent-Length: 14\\\\r\\\\nConnection: close\\\\r\\\\n\\\\r\\\\ncontainerd-ok\\\\n' | nc -l -p $PORT; done\"]\n"), 0o644)
 	tarPath := filepath.Join(dir, "image.tar")
-	if out, err := exec.Command("docker", "buildx", "build", "-q", "--output", "type=oci,dest="+tarPath, src).CombinedOutput(); err != nil {
-		t.Fatalf("build: %v %s", err, out)
+	var blog strings.Builder
+	if err := (&builder.DockerBuildx{}).Build(ctx, builder.Spec{ContextDir: src, DockerfileDir: src, Dockerfile: "Dockerfile", Output: builder.OutputOCI, Dest: tarPath}, &blog); err != nil {
+		t.Fatalf("build: %v %s", err, blog.String())
 	}
 	st, _ := artifact.NewStore(filepath.Join(dir, "store"), artifact.DefaultLimits)
 	f, _ := os.Open(tarPath)

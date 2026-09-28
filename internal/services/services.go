@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -154,7 +155,7 @@ func Builderd(n *config.Node, ids *ipc.IdentityMap, log *slog.Logger, sink audit
 	var trusted builder.Executor
 	switch n.Build.Executor {
 	case "docker":
-		trusted = &builder.DockerBuildx{Host: n.Runtime.DockerHost}
+		trusted = &builder.DockerBuildx{Host: n.Runtime.DockerHost, CABundle: n.Build.CABundle, Mirrors: engineMirrors()}
 	default:
 		trusted = &builder.Buildctl{Addr: n.Build.BuildKitAddr}
 	}
@@ -254,4 +255,20 @@ func RestoreEdge(ctx context.Context, m *router.Manager, log *slog.Logger) {
 		case <-time.After(2 * time.Second):
 		}
 	}
+}
+
+// engineMirrors returns the Docker engine's registry mirrors so a dedicated
+// buildx builder pulls through the same mirrors as the engine.
+func engineMirrors() []string {
+	b, err := os.ReadFile("/etc/docker/daemon.json")
+	if err != nil {
+		return nil
+	}
+	var cfg struct {
+		Mirrors []string `json:"registry-mirrors"`
+	}
+	if json.Unmarshal(b, &cfg) != nil {
+		return nil
+	}
+	return cfg.Mirrors
 }
