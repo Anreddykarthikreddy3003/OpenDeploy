@@ -16,6 +16,8 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: Modules (as the runner user, before any sudo step)
+        run: go mod download
       - name: Tooling
         run: sudo apt-get update && sudo apt-get install -y nftables
       - name: gVisor (untrusted runtime + sandboxed builds)
@@ -37,9 +39,9 @@ jobs:
       - name: Relay isolation and domain lifecycle (ST-07, ST-08)
         run: |
           set -o pipefail
-          go test -race -count=1 -v ./internal/relay/ ./internal/domains/ | tee -a adversarial.log
-          go test -race -count=1 -v -run 'Domain|RelayMode' ./internal/platform/ | tee -a adversarial.log
-          go test -count=1 -run '^$' -fuzz FuzzPeekSNI -fuzztime 60s ./internal/relay/
+          sudo -E env "PATH=$PATH" go test -race -count=1 -v ./internal/relay/ ./internal/domains/ | tee -a adversarial.log
+          sudo -E env "PATH=$PATH" go test -race -count=1 -v -run 'Domain|RelayMode' ./internal/platform/ | tee -a adversarial.log
+          sudo -E env "PATH=$PATH" go test -count=1 -run '^$' -fuzz FuzzPeekSNI -fuzztime 60s ./internal/relay/
       - uses: actions/upload-artifact@v4
         if: always()
         with:
