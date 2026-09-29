@@ -15,19 +15,16 @@ SupplementaryGroups=od-ipc od-backup
 ExecStart=/opt/opendeploy/current/bin/runtimed --config /etc/opendeploy/node.yaml
 Restart=always
 RestartSec=2
-ReadWritePaths=/var/lib/opendeploy/runtimed /var/lib/opendeploy/volumes /var/lib/opendeploy/backup-staging /run/opendeploy /run/netns -/run/containerd
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
 AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
 NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=yes
-PrivateTmp=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectKernelLogs=yes
-ProtectControlGroups=yes
+# No mount-namespacing options (ProtectSystem, PrivateTmp, ReadWritePaths, ...):
+# runtimed bind-mounts workload network namespaces under /run/netns, and those
+# mounts must be visible to containerd/runc in the host mount namespace or
+# runc fails to setns. runtimed drives containerd and holds CAP_SYS_ADMIN, so
+# it is root-equivalent regardless; its boundary is the narrow,
+# peer-authenticated IPC API, the capability set and the syscall filter.
 ProtectClock=yes
-ProtectHostname=yes
 RestrictSUIDSGID=yes
 RestrictRealtime=yes
 LockPersonality=yes
