@@ -220,3 +220,17 @@ func TestCaddyIntegration(t *testing.T) {
 		t.Fatalf("resolver calls: %v", resolved)
 	}
 }
+
+func TestRenderPrivateACMEDirectory(t *testing.T) {
+	o := opts(t.TempDir())
+	o.ACMECA, o.ACMECARoot = "https://ca.internal/acme/directory", "/etc/opendeploy/acme-root.pem"
+	cfg, err := Render(Table{Routes: []Route{{EnvironmentID: "e1", DeploymentID: "d1", Hosts: []string{"a.example.com"}, Kind: KindProxy, Upstreams: []string{"10.0.0.2:80"}, TLS: TLSACME}}}, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"ca":"https://ca.internal/acme/directory"`, `"trusted_roots_pem_files":["/etc/opendeploy/acme-root.pem"]`} {
+		if !strings.Contains(string(cfg), want) {
+			t.Fatalf("missing %s in %s", want, cfg)
+		}
+	}
+}

@@ -236,7 +236,7 @@ func Runtimed(n *config.Node, ids *ipc.IdentityMap, log *slog.Logger, sink audit
 // Routemgr builds the edge route manager.
 func Routemgr(n *config.Node, ids *ipc.IdentityMap, log *slog.Logger, sink audit.Sink, art *artifact.Client) (*ipc.Server, *router.Manager, error) {
 	o := router.Options{AdminSocket: n.Ingress.CaddyAdmin, HTTPPort: n.Ingress.HTTPPort, HTTPSPort: n.Ingress.HTTPSPort,
-		VerifyListen: "127.0.0.1:18080", ACMEEmail: n.Ingress.ACMEEmail, ACMECA: n.Ingress.ACMECA,
+		VerifyListen: "127.0.0.1:18080", ACMEEmail: n.Ingress.ACMEEmail, ACMECA: n.Ingress.ACMECA, ACMECARoot: n.Ingress.ACMECARoot,
 		MaxBodyBytes: n.Ingress.Limits.MaxBodyBytes, MaxConns: n.Ingress.Limits.MaxConnsPerHost,
 		StateDir: n.ServiceDir(identity.Router), LANOnly: n.Ingress.Mode == "lan"}
 	m := router.NewManager(router.NewCaddy(o.AdminSocket), o)

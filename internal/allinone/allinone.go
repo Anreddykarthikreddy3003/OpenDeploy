@@ -26,6 +26,7 @@ import (
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/audit"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/build/builder"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/config"
+	"github.com/anreddykarthikreddy3003/opendeploy/internal/domains"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/git"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/identity"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/ipc"
@@ -51,6 +52,9 @@ type Options struct {
 	// RequireMFA enforces MFA for owner/admin roles (production default;
 	// off by default in the harness).
 	RequireMFA bool
+	// DNS replaces the domain verifier (tests with a local authoritative
+	// server).
+	DNS domains.Verifier
 }
 
 // Stack is a running all-in-one deployment.
@@ -241,6 +245,9 @@ func Start(ctx context.Context, o Options) (*Stack, error) {
 		return fail(err)
 	}
 	s.P = pd
+	if o.DNS != nil {
+		pd.Platform.DNS = o.DNS
+	}
 	s.closers = append(s.closers, func() { pd.Store.Close() })
 	s.wg.Add(1)
 	go func() {

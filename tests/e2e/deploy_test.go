@@ -112,16 +112,7 @@ func TestDeployRealApps(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	jar, _ := cookiejar.New(nil)
-	c := &client{t: t, base: "http://" + s.APIAddr, hc: &http.Client{Jar: jar, Timeout: 5 * time.Minute}}
-	tok, _ := os.ReadFile(services.BootstrapTokenPath(s.Node))
-	var sess struct {
-		CSRFToken string `json:"csrf_token"`
-	}
-	if c.json("POST", "/api/v2/auth/bootstrap", map[string]string{"token": strings.TrimSpace(string(tok)), "email": "o@example.com", "password": "correct horse battery"}, &sess) != 201 {
-		t.Fatal("bootstrap")
-	}
-	c.csrf = sess.CSRFToken
+	c := bootstrap(t, s)
 
 	apps := []struct{ name, dir, want string }{
 		{"static", "fixtures/static", "hello from static"},
@@ -143,50 +134,11 @@ func TestDeployRealApps(t *testing.T) {
 		a := a
 		t.Run(a.name, func(t *testing.T) {
 			c.t = t
-			var created struct {
-				Project struct {
-					ID string `json:"id"`
-				} `json:"project"`
-			}
 			env := map[string]string{}
 			if a.name == "node" {
 				env["GREETING"] = "e2e"
 			}
-			if c.json("POST", "/api/v2/projects", map[string]any{"name": a.name, "env": env}, &created) != 201 {
-				t.Fatal("create project")
-			}
-			var dep struct {
-				ID string `json:"id"`
-			}
-			if code := c.do("POST", "/api/v2/projects/"+created.Project.ID+"/deployments/upload", "application/gzip", tarGz(t, a.dir), &dep); code != 202 {
-				t.Fatalf("upload %d", code)
-			}
-			deadline := time.Now().Add(15 * time.Minute)
-			var st string
-			for time.Now().Before(deadline) {
-				var out struct {
-					Deployment struct {
-						Status string `json:"status"`
-						Error  string `json:"error"`
-					} `json:"deployment"`
-				}
-				c.json("GET", "/api/v2/deployments/"+dep.ID, nil, &out)
-				st = out.Deployment.Status
-				if st == "SUCCEEDED" || st == "FAILED" {
-					break
-				}
-				time.Sleep(2 * time.Second)
-			}
-			if st != "SUCCEEDED" {
-				var logs []struct {
-					Line string `json:"line"`
-				}
-				c.json("GET", "/api/v2/deployments/"+dep.ID+"/logs", nil, &logs)
-				for _, l := range logs {
-					t.Log(l.Line)
-				}
-				t.Fatalf("deployment ended in %s", st)
-			}
+			deployDir(t, c, a.name, a.dir, env)
 			host := a.name + ".od.test"
 			req, _ := http.NewRequest("GET", fmt.Sprintf("http://127.0.0.1:%d/", s.Node.Ingress.HTTPPort), nil)
 			req.Host = host
@@ -201,4 +153,68 @@ func TestDeployRealApps(t *testing.T) {
 			}
 		})
 	}
+}
+
+// bootstrap creates the owner account on a fresh stack and returns a
+// logged-in API client.
+func bootstrap(t *testing.T, s *allinone.Stack) *client {
+	t.Helper()
+	jar, _ := cookiejar.New(nil)
+	c := &client{t: t, base: "http://" + s.APIAddr, hc: &http.Client{Jar: jar, Timeout: 5 * time.Minute}}
+	tok, _ := os.ReadFile(services.BootstrapTokenPath(s.Node))
+	var sess struct {
+		CSRFToken string `json:"csrf_token"`
+	}
+	if c.json("POST", "/api/v2/auth/bootstrap", map[string]string{"token": strings.TrimSpace(string(tok)), "email": "o@example.com", "password": "correct horse battery"}, &sess) != 201 {
+		t.Fatal("bootstrap")
+	}
+	c.csrf = sess.CSRFToken
+	return c
+}
+
+// deployDir creates a project, uploads dir as its source and waits for the
+// deployment to succeed. It returns the project ID.
+func deployDir(t *testing.T, c *client, name, dir string, env map[string]string) string {
+	t.Helper()
+	var created struct {
+		Project struct {
+			ID string `json:"id"`
+		} `json:"project"`
+	}
+	if c.json("POST", "/api/v2/projects", map[string]any{"name": name, "env": env}, &created) != 201 {
+		t.Fatal("create project")
+	}
+	var dep struct {
+		ID string `json:"id"`
+	}
+	if code := c.do("POST", "/api/v2/projects/"+created.Project.ID+"/deployments/upload", "application/gzip", tarGz(t, dir), &dep); code != 202 {
+		t.Fatalf("upload %d", code)
+	}
+	deadline := time.Now().Add(15 * time.Minute)
+	var st string
+	for time.Now().Before(deadline) {
+		var out struct {
+			Deployment struct {
+				Status string `json:"status"`
+				Error  string `json:"error"`
+			} `json:"deployment"`
+		}
+		c.json("GET", "/api/v2/deployments/"+dep.ID, nil, &out)
+		st = out.Deployment.Status
+		if st == "SUCCEEDED" || st == "FAILED" {
+			break
+		}
+		time.Sleep(2 * time.Second)
+	}
+	if st != "SUCCEEDED" {
+		var logs []struct {
+			Line string `json:"line"`
+		}
+		c.json("GET", "/api/v2/deployments/"+dep.ID+"/logs", nil, &logs)
+		for _, l := range logs {
+			t.Log(l.Line)
+		}
+		t.Fatalf("deployment ended in %s", st)
+	}
+	return created.Project.ID
 }

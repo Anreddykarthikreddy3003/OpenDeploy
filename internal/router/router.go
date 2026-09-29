@@ -78,6 +78,7 @@ type Options struct {
 	VerifyListen string // loopback-only verification server, e.g. 127.0.0.1:18080
 	ACMEEmail    string
 	ACMECA       string
+	ACMECARoot   string // PEM file trusted for the ACME directory's HTTPS
 	MaxBodyBytes int64
 	MaxConns     int
 	StateDir     string
@@ -212,6 +213,9 @@ func Render(t Table, o Options) ([]byte, error) {
 		}
 		if o.ACMECA != "" {
 			issuer["ca"] = o.ACMECA
+		}
+		if o.ACMECARoot != "" {
+			issuer["trusted_roots_pem_files"] = []string{o.ACMECARoot}
 		}
 		policies = append(policies, map[string]any{"subjects": acmeHosts, "issuers": []any{issuer}})
 	}

@@ -77,10 +77,13 @@ type GitHubConfig struct {
 }
 
 type IngressConfig struct {
-	Mode        string      `yaml:"mode"` // lan | direct | relay
-	BaseDomain  string      `yaml:"base_domain"`
-	ACMEEmail   string      `yaml:"acme_email"`
-	ACMECA      string      `yaml:"acme_ca"`
+	Mode       string `yaml:"mode"` // lan | direct | relay
+	BaseDomain string `yaml:"base_domain"`
+	ACMEEmail  string `yaml:"acme_email"`
+	ACMECA     string `yaml:"acme_ca"`
+	// ACMECARoot is a PEM bundle trusted for a private ACME directory's
+	// own HTTPS endpoint (step-ca, an enterprise CA, a test CA).
+	ACMECARoot  string      `yaml:"acme_ca_root"`
 	PublicIPv4  string      `yaml:"public_ipv4"`
 	PublicIPv6  string      `yaml:"public_ipv6"`
 	HTTPPort    int         `yaml:"http_port"`

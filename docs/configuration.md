@@ -54,6 +54,7 @@ MFA is mandatory for owners and admins either way.
 | `mode` (`lan`) | `lan`: plain HTTP on the local network (desktop nodes use `localhost` names). `direct`: a public IP with ACME certificates. `relay`: no inbound ports, traffic arrives through an OpenDeploy relay (see `docs/relay.md`). |
 | `base_domain` | Generated URLs are `<project>.<base_domain>`. Point a wildcard DNS record at the node. |
 | `acme_email`, `acme_ca` | ACME account email and CA URL (default Let's Encrypt). |
+| `acme_ca_root` | PEM bundle trusted for a private ACME directory's own HTTPS endpoint (step-ca, an enterprise CA). |
 | `public_ipv4`, `public_ipv6` | Used to check that a custom domain's DNS routes to this node before it is attached. |
 | `http_port` (80), `https_port` (443) | Edge ports. |
 | `caddy_admin_socket` | Caddy's admin API socket. It is never exposed over TCP. |
