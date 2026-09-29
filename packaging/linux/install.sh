@@ -75,12 +75,22 @@ install -D -m 0644 "$PKG/sysctl.d/opendeploy.conf" /usr/lib/sysctl.d/60-opendepl
 sysctl -q -p /usr/lib/sysctl.d/60-opendeploy.conf || warn "could not apply /usr/lib/sysctl.d/60-opendeploy.conf"
 
 # Ubuntu 23.10+ confines unprivileged user namespaces with AppArmor; rootless
-# BuildKit needs them for rootlesskit only (the same profile Docker's rootless
-# setup installs).
+# BuildKit needs them for rootlesskit only. Ubuntu 24.04+ ships a profile for
+# /usr/bin/rootlesskit itself: a second profile for the same path makes the
+# attachment ambiguous and leaves rootlesskit unconfined (user namespaces
+# denied), so ours is installed only where the distribution has none.
+AA_OURS=/etc/apparmor.d/opendeploy-rootlesskit
 if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = 1 ] &&
 	command -v apparmor_parser >/dev/null 2>&1 && [ -x /usr/bin/rootlesskit ]; then
-	say "allowing user namespaces for rootlesskit (AppArmor)"
-	cat > /etc/apparmor.d/opendeploy-rootlesskit <<'PROFILE'
+	if find /etc/apparmor.d -maxdepth 1 -type f ! -name opendeploy-rootlesskit -exec grep -l '/usr/bin/rootlesskit' {} + 2>/dev/null | grep -q .; then
+		say "using the distribution's AppArmor profile for rootlesskit"
+		if [ -f "$AA_OURS" ]; then
+			apparmor_parser -R "$AA_OURS" 2>/dev/null || true
+			rm -f "$AA_OURS"
+		fi
+	else
+		say "allowing user namespaces for rootlesskit (AppArmor)"
+		cat > "$AA_OURS" <<'PROFILE'
 abi <abi/4.0>,
 include <tunables/global>
 
@@ -89,7 +99,8 @@ profile opendeploy-rootlesskit /usr/bin/rootlesskit flags=(unconfined) {
   include if exists <local/opendeploy-rootlesskit>
 }
 PROFILE
-	apparmor_parser -r /etc/apparmor.d/opendeploy-rootlesskit || warn "could not load the rootlesskit AppArmor profile"
+		apparmor_parser -r "$AA_OURS" || warn "could not load the rootlesskit AppArmor profile"
+	fi
 fi
 
 # ---- release slots -----------------------------------------------------------------

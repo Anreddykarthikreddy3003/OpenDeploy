@@ -112,7 +112,7 @@ jobs:
       - name: rootless BuildKit diagnostics
         if: failure()
         run: |
-          set -x
+          set +e -x
           cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns /proc/sys/kernel/unprivileged_userns_clone /proc/sys/user/max_user_namespaces || true
           ls -l /etc/apparmor.d | grep -i -e rootless -e opendeploy || true
           sudo aa-status 2>/dev/null | grep -i -e rootless -e opendeploy || true
