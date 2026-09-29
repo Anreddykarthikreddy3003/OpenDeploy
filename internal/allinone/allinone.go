@@ -313,6 +313,11 @@ func (s *Stack) fakeCaddy(ctx context.Context) error {
 		defer mu.Unlock()
 		_, _ = w.Write(servers)
 	})
+	mux.HandleFunc("GET /config/", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		_, _ = fmt.Fprintf(w, `{"apps":{"http":{"servers":%s}}}`, servers)
+	})
 	hs := &http.Server{Handler: mux}
 	s.wg.Add(1)
 	go func() {

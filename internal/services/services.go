@@ -240,19 +240,23 @@ func Routemgr(n *config.Node, ids *ipc.IdentityMap, log *slog.Logger, sink audit
 		MaxBodyBytes: n.Ingress.Limits.MaxBodyBytes, MaxConns: n.Ingress.Limits.MaxConnsPerHost,
 		StateDir: n.ServiceDir(identity.Router), LANOnly: n.Ingress.Mode == "lan"}
 	m := router.NewManager(router.NewCaddy(o.AdminSocket), o)
+	m.Resolve = art.StaticDir
 	srv := ipc.NewServer(identity.Router, ids, log)
 	router.Register(srv, &router.Service{M: m, Audit: sink, Resolve: art.StaticDir})
 	return srv, m, nil
 }
 
-// RestoreEdge reloads last-known-good routes once Caddy is reachable.
+// RestoreEdge loads the last-known-good edge configuration at start and then
+// watches that Caddy keeps serving it.
 func RestoreEdge(ctx context.Context, m *router.Manager, log *slog.Logger) {
 	for i := 0; ; i++ {
 		if err := m.Restore(ctx); err == nil {
 			log.Info("edge restored from last-known-good configuration")
+			// Caddy can restart independently of routemgr; keep it serving.
+			m.Watch(ctx, 5*time.Second, log.Warn)
 			return
 		} else if i%10 == 0 {
-			log.Warn("waiting for caddy admin socket", "err", err)
+			log.Warn("edge restore failed; retrying", "err", err)
 		}
 		select {
 		case <-ctx.Done():

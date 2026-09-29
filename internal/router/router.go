@@ -169,13 +169,18 @@ func Render(t Table, o Options) ([]byte, error) {
 		}
 		verify = append(verify, renderRoute(r, o, true))
 	}
-	notFound := map[string]any{"handle": []any{map[string]any{"handler": "static_response", "status_code": 404,
-		"body": "No OpenDeploy deployment is configured for this host.\n", "headers": map[string][]string{"Content-Type": {"text/plain; charset=utf-8"}}}}}
+	// Each server ends with a catch-all 404 carrying a unique @id: its
+	// presence tells the routemgr watchdog that our configuration (and not
+	// Caddy's bootstrap config) is loaded.
+	notFound := func(name string) map[string]any {
+		return map[string]any{"@id": DefaultRouteID(name), "handle": []any{map[string]any{"handler": "static_response", "status_code": 404,
+			"body": "No OpenDeploy deployment is configured for this host.\n", "headers": map[string][]string{"Content-Type": {"text/plain; charset=utf-8"}}}}}
+	}
 
-	server := func(listen string, rs []any) map[string]any {
+	server := func(name, listen string, rs []any) map[string]any {
 		return map[string]any{
 			"listen":              []string{listen},
-			"routes":              append(rs, notFound),
+			"routes":              append(rs, notFound(name)),
 			"max_header_bytes":    64 << 10,
 			"read_header_timeout": "10s",
 			"read_timeout":        "60s",
@@ -186,14 +191,14 @@ func Render(t Table, o Options) ([]byte, error) {
 	// Plain-HTTP hosts (LAN mode) are served on the HTTP port. Caddy's
 	// automatic HTTPS also uses this server for ACME HTTP-01 challenges and
 	// HTTP->HTTPS redirects of TLS hosts.
-	servers["http"] = server(fmt.Sprintf(":%d", o.HTTPPort), plainRoutes)
+	servers["http"] = server("http", fmt.Sprintf(":%d", o.HTTPPort), plainRoutes)
 	if len(tlsRoutes) > 0 {
-		srv := server(fmt.Sprintf(":%d", o.HTTPSPort), tlsRoutes)
+		srv := server("https", fmt.Sprintf(":%d", o.HTTPSPort), tlsRoutes)
 		srv["logs"] = map[string]any{}
 		servers["https"] = srv
 	}
 	if o.VerifyListen != "" {
-		v := server(o.VerifyListen, verify)
+		v := server("verify", o.VerifyListen, verify)
 		v["automatic_https"] = map[string]any{"disable": true}
 		servers["verify"] = v
 	}
@@ -355,9 +360,10 @@ func (c *Caddy) Load(ctx context.Context, cfg []byte) error {
 	return nil
 }
 
-// RouteIDs returns the @id values of all loaded routes across servers.
+// RouteIDs returns the @id values of all loaded routes across servers. A
+// Caddy running only its bootstrap config (no http app) has none.
 func (c *Caddy) RouteIDs(ctx context.Context) (map[string]bool, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://caddy/config/apps/http/servers", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://caddy/config/", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -366,16 +372,25 @@ func (c *Caddy) RouteIDs(ctx context.Context) (map[string]bool, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	var servers map[string]struct {
-		Routes []struct {
-			ID string `json:"@id"`
-		} `json:"routes"`
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("caddy config: %s", resp.Status)
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<20)).Decode(&servers); err != nil {
+	var cfg struct {
+		Apps struct {
+			HTTP struct {
+				Servers map[string]struct {
+					Routes []struct {
+						ID string `json:"@id"`
+					} `json:"routes"`
+				} `json:"servers"`
+			} `json:"http"`
+		} `json:"apps"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<20)).Decode(&cfg); err != nil {
 		return nil, err
 	}
 	out := map[string]bool{}
-	for _, srv := range servers {
+	for _, srv := range cfg.Apps.HTTP.Servers {
 		for _, r := range srv.Routes {
 			if r.ID != "" {
 				out[r.ID] = true
@@ -387,8 +402,12 @@ func (c *Caddy) RouteIDs(ctx context.Context) (map[string]bool, error) {
 
 // Manager applies tables with verification and last-known-good tracking.
 type Manager struct {
-	Caddy   *Caddy
-	Opt     Options
+	Caddy *Caddy
+	Opt   Options
+	// Resolve maps static artifact digests to directories when reloading
+	// last-known-good (directories are never persisted or accepted from
+	// callers).
+	Resolve StaticResolver
 	mu      sync.Mutex
 	current Table
 	digest  string
@@ -524,11 +543,91 @@ func (m *Manager) verifyRoute(ctx context.Context, r *Route) (string, error) {
 	return "", lastErr
 }
 
+// resolveStatic fills in static directories missing from t (a table loaded
+// from last-known-good). Called with m.mu held.
+func (m *Manager) resolveStatic(ctx context.Context, t *Table) error {
+	for i := range t.Routes {
+		r := &t.Routes[i]
+		if r.Kind != KindStatic || r.StaticDir != "" {
+			continue
+		}
+		if m.Resolve == nil {
+			return fmt.Errorf("route %s: static resolver unavailable", r.EnvironmentID)
+		}
+		dir, err := m.Resolve(ctx, r.StaticDigest)
+		if err != nil {
+			return fmt.Errorf("route %s: static artifact %s: %w", r.EnvironmentID, r.StaticDigest, err)
+		}
+		r.StaticDir = dir
+	}
+	return nil
+}
+
+// DefaultRouteID is the @id of a server's catch-all route.
+func DefaultRouteID(server string) string { return "od-default-" + server }
+
+// EnsureLoaded reloads the last-known-good table when Caddy is not serving
+// it, e.g. after Caddy restarted on its own (crash, OOM, package upgrade)
+// and came back with only its bootstrap configuration. It reports whether
+// a reload was needed.
+func (m *Manager) EnsureLoaded(ctx context.Context) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ids, err := m.Caddy.RouteIDs(ctx)
+	if err != nil {
+		return false, err
+	}
+	missing := !ids[DefaultRouteID("http")]
+	for _, r := range m.current.Routes {
+		if !ids["route-"+r.EnvironmentID] {
+			missing = true
+		}
+	}
+	if !missing {
+		return false, nil
+	}
+	if err := m.resolveStatic(ctx, &m.current); err != nil {
+		return false, err
+	}
+	cfg, err := Render(m.current, m.Opt)
+	if err != nil {
+		return false, err
+	}
+	if err := m.Caddy.Load(ctx, cfg); err != nil {
+		return false, err
+	}
+	m.digest = Digest(cfg)
+	return true, nil
+}
+
+// Watch keeps Caddy serving the last-known-good table until ctx ends.
+func (m *Manager) Watch(ctx context.Context, every time.Duration, log func(msg string, args ...any)) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			reloaded, err := m.EnsureLoaded(ctx)
+			if reloaded {
+				log("edge configuration was missing from Caddy (restart?); reloaded last-known-good")
+			} else if err != nil && ctx.Err() == nil {
+				log("edge watchdog: caddy unreachable", "err", err)
+			}
+		}
+	}
+}
+
 // Restore reloads the last-known-good table (boot recovery).
 func (m *Manager) Restore(ctx context.Context) error {
 	m.mu.Lock()
+	err := m.resolveStatic(ctx, &m.current)
 	t := m.current
 	m.mu.Unlock()
+	if err != nil {
+		return err
+	}
 	cfg, err := Render(t, m.Opt)
 	if err != nil {
 		return err

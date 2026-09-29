@@ -222,63 +222,132 @@ func TestInstalledNode(t *testing.T) {
 		if c.json("POST", "/api/v2/auth/totp/confirm", map[string]string{"code": code}, nil) != 200 {
 			t.Fatal("totp confirm")
 		}
+		domain := env("OPENDEPLOY_BASE_DOMAIN", "od.test")
+		deployApp := func(t *testing.T, name, dir, want string) {
+			c.t = t
+			var created struct {
+				Project struct {
+					ID string `json:"id"`
+				} `json:"project"`
+			}
+			if c.json("POST", "/api/v2/projects", map[string]any{"name": name}, &created) != 201 {
+				t.Fatal("create project")
+			}
+			var dep struct {
+				ID string `json:"id"`
+			}
+			if code := c.do("POST", "/api/v2/projects/"+created.Project.ID+"/deployments/upload", "application/gzip", tarGz(t, dir), &dep); code != 202 {
+				t.Fatalf("upload %d", code)
+			}
+			var st string
+			for deadline := time.Now().Add(15 * time.Minute); time.Now().Before(deadline); time.Sleep(2 * time.Second) {
+				var out struct {
+					Deployment struct {
+						Status string `json:"status"`
+					} `json:"deployment"`
+				}
+				c.json("GET", "/api/v2/deployments/"+dep.ID, nil, &out)
+				if st = out.Deployment.Status; st == "SUCCEEDED" || st == "FAILED" {
+					break
+				}
+			}
+			if st != "SUCCEEDED" {
+				var logs []struct {
+					Line string `json:"line"`
+				}
+				c.json("GET", "/api/v2/deployments/"+dep.ID+"/logs", nil, &logs)
+				for _, l := range logs {
+					t.Log(l.Line)
+				}
+				for _, u := range []string{"builderd", "buildkitd", "runtimed", "platformd"} {
+					journal(t, u)
+				}
+				t.Fatalf("deployment ended in %s", st)
+			}
+			req, _ := http.NewRequest("GET", "http://127.0.0.1:80/", nil)
+			req.Host = fmt.Sprintf("%s.%s", name, env("OPENDEPLOY_BASE_DOMAIN", "od.test"))
+			res, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, _ := io.ReadAll(res.Body)
+			res.Body.Close()
+			if res.StatusCode != 200 || !strings.Contains(string(body), want) {
+				t.Fatalf("GET %s -> %d %q", req.Host, res.StatusCode, body)
+			}
+		}
 		for _, a := range []struct{ name, dir, want string }{
 			{"static", "../e2e/fixtures/static", "hello from static"},
 			{"node", "../e2e/fixtures/node", "hello from node"},
 		} {
-			t.Run(a.name, func(t *testing.T) {
-				c.t = t
-				var created struct {
-					Project struct {
-						ID string `json:"id"`
-					} `json:"project"`
-				}
-				if c.json("POST", "/api/v2/projects", map[string]any{"name": a.name}, &created) != 201 {
-					t.Fatal("create project")
-				}
-				var dep struct {
-					ID string `json:"id"`
-				}
-				if code := c.do("POST", "/api/v2/projects/"+created.Project.ID+"/deployments/upload", "application/gzip", tarGz(t, a.dir), &dep); code != 202 {
-					t.Fatalf("upload %d", code)
-				}
-				var st string
-				for deadline := time.Now().Add(15 * time.Minute); time.Now().Before(deadline); time.Sleep(2 * time.Second) {
-					var out struct {
-						Deployment struct {
-							Status string `json:"status"`
-						} `json:"deployment"`
-					}
-					c.json("GET", "/api/v2/deployments/"+dep.ID, nil, &out)
-					if st = out.Deployment.Status; st == "SUCCEEDED" || st == "FAILED" {
-						break
-					}
-				}
-				if st != "SUCCEEDED" {
-					var logs []struct {
-						Line string `json:"line"`
-					}
-					c.json("GET", "/api/v2/deployments/"+dep.ID+"/logs", nil, &logs)
-					for _, l := range logs {
-						t.Log(l.Line)
-					}
-					for _, u := range []string{"builderd", "buildkitd", "runtimed", "platformd"} {
-						journal(t, u)
-					}
-					t.Fatalf("deployment ended in %s", st)
-				}
-				req, _ := http.NewRequest("GET", "http://127.0.0.1:80/", nil)
-				req.Host = fmt.Sprintf("%s.%s", a.name, env("OPENDEPLOY_BASE_DOMAIN", "od.test"))
-				res, err := http.DefaultClient.Do(req)
-				if err != nil {
-					t.Fatal(err)
-				}
-				body, _ := io.ReadAll(res.Body)
-				res.Body.Close()
-				if res.StatusCode != 200 || !strings.Contains(string(body), a.want) {
-					t.Fatalf("GET %s -> %d %q", req.Host, res.StatusCode, body)
-				}
-			})
+			t.Run(a.name, func(t *testing.T) { deployApp(t, a.name, a.dir, a.want) })
 		}
+
+		// Chaos: Tier-0 services die or restart underneath a serving node.
+		// Apps must keep (or quickly resume) serving without intervention,
+		// and the node must still deploy afterwards.
+		t.Run("chaos", func(t *testing.T) {
+			c.t = t
+			host := "static." + domain
+			serving := func() bool {
+				req, _ := http.NewRequest("GET", "http://127.0.0.1:80/", nil)
+				req.Host = host
+				res, err := (&http.Client{Timeout: 3 * time.Second}).Do(req)
+				if err != nil {
+					return false
+				}
+				b, _ := io.ReadAll(res.Body)
+				res.Body.Close()
+				return res.StatusCode == 200 && strings.Contains(string(b), "hello from static")
+			}
+			waitFor := func(what string, cond func() bool) {
+				t.Helper()
+				for deadline := time.Now().Add(90 * time.Second); time.Now().Before(deadline); time.Sleep(time.Second) {
+					if cond() {
+						return
+					}
+				}
+				for _, u := range []string{"caddy", "routemgr", "platformd"} {
+					journal(t, u)
+				}
+				t.Fatalf("%s: did not recover within 90s", what)
+			}
+			healthy := func() bool {
+				res, err := (&http.Client{Timeout: 3 * time.Second}).Get(api + "/healthz")
+				if err != nil {
+					return false
+				}
+				res.Body.Close()
+				return res.StatusCode == 200
+			}
+			systemctl := func(args ...string) {
+				t.Helper()
+				if out, err := exec.Command("systemctl", args...).CombinedOutput(); err != nil {
+					t.Fatalf("systemctl %v: %v %s", args, err, out)
+				}
+			}
+			if !serving() {
+				t.Skip("static app not deployed")
+			}
+			// Caddy restarts on its own and comes back with only its
+			// bootstrap config: routemgr's watchdog reloads the routes.
+			systemctl("restart", "opendeploy-caddy.service")
+			waitFor("app after Caddy restart", serving)
+			// The control plane is killed; apps keep serving throughout.
+			systemctl("kill", "--signal=KILL", "opendeploy-platformd.service")
+			if !serving() {
+				t.Fatal("app stopped serving when platformd died")
+			}
+			waitFor("platformd after SIGKILL", healthy)
+			// routemgr restarts: it restores last-known-good at start.
+			systemctl("restart", "opendeploy-routemgr.service")
+			waitFor("app after routemgr restart", serving)
+			// Whole node restart (e.g. host reboot of the services).
+			systemctl("restart", "opendeploy.target")
+			waitFor("API after full restart", healthy)
+			waitFor("app after full restart", serving)
+			// Sessions survive restarts and the node still deploys.
+			deployApp(t, "static-after-chaos", "../e2e/fixtures/static", "hello from static")
+		})
 	})
 }

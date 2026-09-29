@@ -168,9 +168,55 @@ func TestCaddyIntegration(t *testing.T) {
 	if _, body, _ := get("app.test", "/"); body != "v2" {
 		t.Fatalf("last-known-good not restored: %q", body)
 	}
+	// Caddy restarting on its own comes back with only the bootstrap config;
+	// the watchdog notices and reloads last-known-good.
+	if reloaded, err := m.EnsureLoaded(ctx); err != nil || reloaded {
+		t.Fatalf("healthy edge reloaded: %v %v", reloaded, err)
+	}
+	if err := NewCaddy(o.AdminSocket).Load(ctx, BootstrapConfig(o.AdminSocket)); err != nil {
+		t.Fatal(err)
+	}
+	req, _ := http.NewRequest("GET", fmt.Sprintf("http://127.0.0.1:%d/", o.HTTPPort), nil)
+	req.Host = "app.test"
+	if res, err := http.DefaultClient.Do(req); err == nil {
+		res.Body.Close()
+		t.Fatal("precondition: edge still serving after the simulated Caddy restart")
+	}
+	if reloaded, err := m.EnsureLoaded(ctx); err != nil || !reloaded {
+		t.Fatalf("watchdog did not reload: %v %v", reloaded, err)
+	}
+	if _, body, _ := get("app.test", "/"); body != "v2" {
+		t.Fatalf("routes not restored after Caddy restart: %q", body)
+	}
 	// Last-known-good persisted for reboot recovery.
 	m2 := NewManager(NewCaddy(o.AdminSocket), o)
 	if cur, _ := m2.Current(); len(cur.Routes) != 2 || cur.Routes[0].DeploymentID != "dep_2" {
 		t.Fatalf("persisted table %+v", cur)
+	}
+	// Node reboot: a fresh routemgr restores last-known-good onto a Caddy
+	// that only has its bootstrap config. Static directories are never
+	// persisted; they are re-resolved from the artifact digest.
+	if err := NewCaddy(o.AdminSocket).Load(ctx, BootstrapConfig(o.AdminSocket)); err != nil {
+		t.Fatal(err)
+	}
+	if err := m2.Restore(ctx); err == nil {
+		t.Fatal("restored static route without a resolver")
+	}
+	var resolved []string
+	m2.Resolve = func(_ context.Context, digest string) (string, error) {
+		resolved = append(resolved, digest)
+		return static, nil
+	}
+	if err := m2.Restore(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if code, body, _ := get("site.test", "/"); code != 200 || !strings.Contains(body, "static") {
+		t.Fatalf("static site after reboot restore: %d %q", code, body)
+	}
+	if _, body, _ := get("app.test", "/"); body != "v2" {
+		t.Fatalf("proxy route after reboot restore: %q", body)
+	}
+	if len(resolved) != 1 {
+		t.Fatalf("resolver calls: %v", resolved)
 	}
 }

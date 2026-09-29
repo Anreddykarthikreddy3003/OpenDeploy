@@ -167,6 +167,15 @@ The procedure is `docs/runbooks.md` R1.
 | `backup.NewDecryptor` indexed a manifest-supplied nonce prefix without a length check, so a crafted backup could panic restore. | Fixed |
 | The relay's HTTP Host peek accepted malformed hosts (spaces), because `http.ReadRequest` does not validate them. Route keys now must be DNS names or IP literals, for SNI as well. | Fixed |
 
+**Chaos testing the installed node (M9):**
+
+| Finding | Status |
+|---|---|
+| After a full node restart, routemgr could not restore static sites: last-known-good deliberately omits directories, and nothing re-resolved them. | Fixed |
+| A Caddy restart on its own (crash, upgrade) left every app unrouted until routemgr restarted. A watchdog now reloads last-known-good. | Fixed |
+
+Both are covered by `router_test.go` and the package test's `deploy/chaos` sequence: Caddy restart, platformd SIGKILL, routemgr restart, full restart, then deploy.
+
 **Booting the packaged guest (M8):**
 
 | Finding | Status |
