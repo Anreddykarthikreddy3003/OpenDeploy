@@ -134,8 +134,10 @@ func TestSupervisorRestartsGuestThatNeverBecomesReady(t *testing.T) {
 	s := &Supervisor{Guest: g, Config: Config{DataDir: t.TempDir()}, ReadyTimeout: 100 * time.Millisecond, MaxBackoff: 10 * time.Millisecond,
 		Healthy: func(context.Context) error { return errors.New("never") }}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() { _ = s.Run(ctx) }()
+	done := make(chan struct{})
+	go func() { _ = s.Run(ctx); close(done) }()
+	// Stop the supervisor before TempDir cleanup: it writes status.json.
+	defer func() { cancel(); <-done }()
 	waitFor(t, "second boot", func() bool { st, _ := g.count(); return st >= 2 })
 	if _, stops := g.count(); stops == 0 {
 		t.Fatal("unready guest was not stopped before restarting")

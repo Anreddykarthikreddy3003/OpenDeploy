@@ -342,6 +342,26 @@ func (s *Store) RevokeUserSessions(ctx context.Context, userID, keepID string) (
 	return n, err
 }
 
+// RevokeAllCredentials signs every user out (all sessions but keepID) and
+// revokes every API token: the first step of incident response.
+func (s *Store) RevokeAllCredentials(ctx context.Context, keepID string) (sessions, tokens int64, err error) {
+	err = s.DB.Tx(ctx, func(tx *sql.Tx) error {
+		now := state.Now()
+		res, err := tx.ExecContext(ctx, `UPDATE sessions SET revoked_at=? WHERE id!=? AND revoked_at=''`, now, keepID)
+		if err != nil {
+			return err
+		}
+		sessions, _ = res.RowsAffected()
+		res, err = tx.ExecContext(ctx, `UPDATE api_tokens SET revoked_at=? WHERE revoked_at=''`, now)
+		if err != nil {
+			return err
+		}
+		tokens, _ = res.RowsAffected()
+		return nil
+	})
+	return sessions, tokens, err
+}
+
 func (s *Store) ListSessions(ctx context.Context, userID string) ([]*Session, error) {
 	rows, err := s.DB.R().QueryContext(ctx, `SELECT `+sessCols+` FROM sessions WHERE user_id=? AND revoked_at='' AND expires_at>? ORDER BY last_seen_at DESC`, userID, state.Now())
 	if err != nil {

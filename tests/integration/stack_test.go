@@ -508,6 +508,26 @@ func TestFullStack(t *testing.T) {
 		t.Fatalf("re-claim verified with the previous owner's stale TXT: %d", code)
 	}
 
+	// ---- Q15: uninstalling the GitHub App blocks new builds immediately
+	instBody, _ := json.Marshal(map[string]any{"action": "deleted", "installation": map[string]any{"id": 77}})
+	instReq, _ := http.NewRequest("POST", base+"/webhooks/github", bytes.NewReader(instBody))
+	instReq.Header.Set("X-GitHub-Event", "installation")
+	instReq.Header.Set("X-GitHub-Delivery", "99999999-9999-9999-9999-999999999999")
+	instReq.Header.Set("X-Hub-Signature-256", github.Sign(secret, instBody))
+	if res, err := http.DefaultClient.Do(instReq); err != nil || res.StatusCode != 202 {
+		t.Fatalf("installation deleted event: %v %v", err, res)
+	} else {
+		res.Body.Close()
+	}
+	if code, r := send("aaaaaaaa-0000-0000-0000-000000000001", strings.Repeat("c", 40), true); code != 202 {
+		t.Fatalf("push after uninstall: %d %v", code, r)
+	} else if deps, _ := r["deployments"].([]any); len(deps) != 0 {
+		t.Fatalf("push after the App was uninstalled still deployed: %v", r)
+	}
+	if c2, _ := s.P.Store.GetEnvironmentByName(ctx, gp.ID, "production"); c2.CurrentDeploymentID != newest {
+		t.Fatal("serving deployment changed after revocation")
+	}
+
 	// ---- RBAC: a viewer cannot deploy and cannot see other projects
 	c.do("POST", "/api/v2/users", map[string]string{"email": "v@example.com", "password": "viewer password 1", "role": "viewer"}, nil)
 	c.do("PUT", "/api/v2/projects/"+created.Project.ID+"/members", map[string]string{"email": "v@example.com", "role": "viewer"}, nil)
@@ -545,6 +565,58 @@ func TestFullStack(t *testing.T) {
 	}
 	if denied == 0 {
 		t.Fatal("forged webhook not audited")
+	}
+
+	// ---- ST-12 incident drill: revoke every credential, rotate the KEK
+	other := newClient(t, base)
+	other.login("v@example.com", "viewer password 1")
+	var tokResp struct {
+		Token string `json:"token"`
+	}
+	if code := c.do("POST", "/api/v2/auth/tokens", map[string]any{"name": "ci", "role": "viewer"}, &tokResp); code != 201 || tokResp.Token == "" {
+		t.Fatalf("create token: %d", code)
+	}
+	useToken := func() int {
+		req, _ := http.NewRequest("GET", base+"/api/v2/projects", nil)
+		req.Header.Set("Authorization", "Bearer "+tokResp.Token)
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		return res.StatusCode
+	}
+	if code := useToken(); code != 200 {
+		t.Fatalf("token before revocation: %d", code)
+	}
+	if code := other.do("POST", "/api/v2/system/incident/revoke-credentials", nil, nil); code != 403 {
+		t.Fatalf("non-owner triggered incident response: %d", code)
+	}
+	var revoked map[string]int64
+	if code := c.do("POST", "/api/v2/system/incident/revoke-credentials", nil, &revoked); code != 200 || revoked["tokens_revoked"] < 1 || revoked["sessions_revoked"] < 1 {
+		t.Fatalf("revoke credentials: %d %v", code, revoked)
+	}
+	if code := other.do("GET", "/api/v2/auth/me", nil, nil); code != 401 {
+		t.Fatalf("other session survived revocation: %d", code)
+	}
+	if code := useToken(); code != 401 {
+		t.Fatalf("API token survived revocation: %d", code)
+	}
+	if code := c.do("GET", "/api/v2/auth/me", nil, nil); code != 200 {
+		t.Fatalf("responder's own session was revoked: %d", code)
+	}
+	var rot struct {
+		KEKID     string `json:"kek_id"`
+		Rewrapped int    `json:"rewrapped"`
+	}
+	if code := c.do("POST", "/api/v2/system/incident/rotate-kek", nil, &rot); code != 200 || rot.KEKID == "" || rot.Rewrapped < 1 {
+		t.Fatalf("rotate KEK: %d %+v", code, rot)
+	}
+	var revealed struct {
+		Value string `json:"value"`
+	}
+	if code := c.do("POST", "/api/v2/projects/"+created.Project.ID+"/secrets/"+metas[0]["id"].(string)+"/reveal", map[string]string{"reason": "incident drill"}, &revealed); code != 200 || revealed.Value != "s3cr3t-value" {
+		t.Fatalf("secret unreadable after KEK rotation: %d %q", code, revealed.Value)
 	}
 }
 

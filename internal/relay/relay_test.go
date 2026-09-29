@@ -468,3 +468,28 @@ func FuzzPeekSNI(f *testing.F) {
 		sv.Close()
 	})
 }
+
+func FuzzPeekHost(f *testing.F) {
+	f.Add([]byte("GET / HTTP/1.1\r\nHost: app.example.com\r\n\r\n"))
+	f.Add([]byte("GET / HTTP/1.1\r\nhost:\r\n\r\n"))
+	f.Fuzz(func(t *testing.T, b []byte) {
+		cl, sv := net.Pipe()
+		go func() { _, _ = cl.Write(b); cl.Close() }()
+		host, replay, err := PeekHost(sv, 200*time.Millisecond)
+		sv.Close()
+		if err == nil && (host == "" || strings.ContainsAny(host, " \r\n/")) {
+			t.Fatalf("bad host %q accepted", host)
+		}
+		if !bytes.HasPrefix(b, replay) {
+			t.Fatal("replayed bytes differ from what was read")
+		}
+	})
+}
+
+func FuzzParseEnrollToken(f *testing.F) {
+	f.Add("odr1.tenant.instance.secret.fingerprint")
+	f.Add("")
+	f.Fuzz(func(t *testing.T, s string) {
+		_, _ = ParseEnrollToken(s)
+	})
+}

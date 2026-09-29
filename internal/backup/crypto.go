@@ -213,6 +213,10 @@ func NewDecryptor(r io.Reader, dek []byte, id string, noncePrefix []byte) (*Decr
 	if err != nil {
 		return nil, err
 	}
+	// The prefix comes from the (untrusted until verified) manifest.
+	if len(noncePrefix) != 4 {
+		return nil, errors.New("nonce prefix must be 4 bytes")
+	}
 	return &Decryptor{r: r, aead: a, id: id, prefix: noncePrefix}, nil
 }
 

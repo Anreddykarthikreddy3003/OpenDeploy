@@ -25,7 +25,7 @@ type HostAgent interface {
 }
 
 // ErrNoHostAgent is returned when hostd is not available (dev mode).
-var ErrNoHostAgent = errors.New("the host agent (hostd) is not running; updates are applied by the installer on this node")
+var ErrNoHostAgent = errors.New("the host agent (hostd) is not running on this node (development or single-process mode)")
 
 // UpdateStatus is shown in the dashboard.
 type UpdateStatus struct {

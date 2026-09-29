@@ -51,3 +51,19 @@ func TestInvalid(t *testing.T) {
 		}
 	}
 }
+
+func FuzzParse(f *testing.F) {
+	for _, s := range []string{"*/5 * * * *", "0 9 * * 1-5", "@daily", "61 * * * *", "* * * * * *", ""} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		sc, err := Parse(s)
+		if err != nil {
+			return
+		}
+		// Matching is total over a day of minutes (no panics on any field).
+		for m := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC); m.Day() == 1; m = m.Add(time.Minute) {
+			_ = sc.Matches(m)
+		}
+	})
+}

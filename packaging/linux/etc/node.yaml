@@ -6,10 +6,12 @@ profile: standard            # tiny | standard | performance
 api:
   listen: 127.0.0.1:8080     # dashboard/API; loopback unless remote admin is configured
   public_url: ""             # e.g. https://deploy.example.com (required for security keys remotely)
-  # remote_admin:
+  # remote_admin:              # see docs/configuration.md#remote-administration
   #   enabled: true
-  #   acknowledged: true      # wildcard binds are refused without this
+  #   acknowledged_risk: true   # non-loopback binds are refused without this
   #   allowed_cidrs: [10.0.0.0/8]
+  #   tls_cert: /etc/opendeploy/admin.crt
+  #   tls_key: /etc/opendeploy/admin.key
 
 ingress:
   mode: direct               # lan | direct | relay

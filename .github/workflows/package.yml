@@ -14,6 +14,12 @@ on:
   push:
     branches: [main, "claude/**"]
   pull_request:
+  workflow_call: # release gate: builds the release's installers (release.yml)
+    inputs:
+      version:
+        description: release version (tag without the v); empty = snapshot
+        type: string
+        default: ""
 permissions:
   contents: read
 jobs:
@@ -38,7 +44,9 @@ jobs:
         uses: goreleaser/goreleaser-action@v6
         with:
           version: "~> v2"
-          args: release --snapshot --clean --skip=before,sign,sbom,publish,validate
+          # Tagged releases build real (non-snapshot) packages so the guest
+          # images and installers carry the release version.
+          args: release ${{ inputs.version == '' && '--snapshot' || '' }} --clean --skip=before,sign,sbom,publish,validate,announce
       - name: package metadata
         run: |
           dpkg-deb -I dist/opendeploy_*_linux-amd64.deb
@@ -169,7 +177,7 @@ jobs:
         run: go test -count=1 ./internal/desktop/... ./cmd/opendeploy-desktop/...
       - name: build binaries
         run: |
-          go build -trimpath -ldflags "-s -w -X main.version=0.0.1" -o out/bin/opendeploy-desktop.exe ./cmd/opendeploy-desktop
+          go build -trimpath -ldflags "-s -w -X main.version=${{ inputs.version || '0.0.1' }}" -o out/bin/opendeploy-desktop.exe ./cmd/opendeploy-desktop
           $zip = Get-ChildItem dist/opendeployctl_*_windows-amd64.zip | Select-Object -First 1
           Expand-Archive $zip.FullName -DestinationPath out/ctl
           Copy-Item out/ctl/bin/opendeployctl.exe out/bin/
@@ -177,7 +185,9 @@ jobs:
       - name: build the MSI
         run: |
           dotnet tool install --global wix --version 5.0.2
-          wix build -arch x64 -d Version=0.0.1 -d BinDir=out\bin -d GuestDir=dist\guest\wsl2-amd64 packaging\windows\opendeploy.wxs -o out\OpenDeploy-x64.msi
+          # MSI versions are numeric: drop any pre-release suffix.
+          $v = '${{ inputs.version || '0.0.1' }}' -replace '-.*$', ''
+          wix build -arch x64 -d Version=$v -d BinDir=out\bin -d GuestDir=dist\guest\wsl2-amd64 packaging\windows\opendeploy.wxs -o out\OpenDeploy-x64.msi
       - name: install -> service, account and status
         run: |
           $p = Start-Process msiexec.exe -ArgumentList '/i', 'out\OpenDeploy-x64.msi', '/qn', '/l*v', 'msi-install.log' -Wait -PassThru
@@ -231,12 +241,12 @@ jobs:
         run: go test -count=1 ./internal/desktop/... ./cmd/opendeploy-desktop/...
       - name: build binaries (cgo, Virtualization.framework)
         run: |
-          CGO_ENABLED=1 go build -trimpath -ldflags "-s -w -X main.version=0.0.1" -o out/bin/opendeploy-desktop ./cmd/opendeploy-desktop
+          CGO_ENABLED=1 go build -trimpath -ldflags "-s -w -X main.version=${{ inputs.version || '0.0.1' }}" -o out/bin/opendeploy-desktop ./cmd/opendeploy-desktop
           mkdir -p out/ctl && tar -xzf dist/opendeployctl_*_darwin-arm64.tar.gz -C out/ctl
           cp out/ctl/bin/opendeployctl out/bin/
           out/bin/opendeploy-desktop version
       - name: build the pkg
-        run: packaging/macos/build-pkg.sh --version 0.0.1 --bin out/bin --guest dist/guest/vz-arm64 --out out/OpenDeploy-arm64.pkg
+        run: packaging/macos/build-pkg.sh --version ${{ inputs.version || '0.0.1' }} --bin out/bin --guest dist/guest/vz-arm64 --out out/OpenDeploy-arm64.pkg
       - name: install -> launchd daemon and status
         run: |
           sudo installer -pkg out/OpenDeploy-arm64.pkg -target /

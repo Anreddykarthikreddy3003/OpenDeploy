@@ -65,6 +65,33 @@ export async function api<T = any>(method: string, path: string, body?: unknown,
   return data as T;
 }
 
+/** POSTs and returns the binary response (file downloads), with the same
+ * CSRF, re-authentication and session handling as api(). */
+export async function download(path: string, retry = true): Promise<{ blob: Blob; filename: string }> {
+  const headers: Record<string, string> = {};
+  if (csrfToken) headers["X-CSRF-Token"] = csrfToken;
+  const res = await fetch(path, { method: "POST", headers, credentials: "same-origin", cache: "no-store" });
+  if (!res.ok) {
+    let data: any = null;
+    try {
+      data = await res.json();
+    } catch {
+      /* not JSON */
+    }
+    const err = new ApiError(res.status, data?.code ?? "error", data?.message ?? `Request failed (${res.status})`, data);
+    if (err.code === "reauth_required" && reauthHandler && retry) {
+      if (await reauthHandler()) return download(path, false);
+    }
+    if (["unauthorized", "mfa_required", "mfa_enrollment_required"].includes(err.code) || res.status === 401) {
+      listeners.forEach((l) => l(err));
+    }
+    throw err;
+  }
+  const cd = res.headers.get("Content-Disposition") ?? "";
+  const m = /filename="([^"]+)"/.exec(cd);
+  return { blob: await res.blob(), filename: m?.[1] ?? "download" };
+}
+
 export const get = <T = any>(p: string) => api<T>("GET", p);
 export const post = <T = any>(p: string, b?: unknown) => api<T>("POST", p, b ?? {});
 export const put = <T = any>(p: string, b?: unknown) => api<T>("PUT", p, b ?? {});

@@ -249,6 +249,7 @@ func (s *Server) routes() {
 	s.domainRoutes(a)
 	s.volumeRoutes(a)
 	s.backupRoutes(a)
+	s.supportRoutes(a)
 	s.updateRoutes(a)
 
 	// system

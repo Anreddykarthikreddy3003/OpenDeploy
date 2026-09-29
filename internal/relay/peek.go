@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -60,7 +61,30 @@ func PeekSNI(conn net.Conn, timeout time.Duration) (string, []byte, error) {
 	if sni == "" {
 		return "", rc.buf.Bytes(), errors.New("client hello without SNI")
 	}
-	return strings.ToLower(strings.TrimSuffix(sni, ".")), rc.buf.Bytes(), nil
+	sni = strings.ToLower(strings.TrimSuffix(sni, "."))
+	if !validRouteHost(sni) {
+		return "", rc.buf.Bytes(), errors.New("invalid SNI")
+	}
+	return sni, rc.buf.Bytes(), nil
+}
+
+var hostLabelRE = regexp.MustCompile(`^[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?$`)
+
+// validRouteHost accepts lower-case DNS names and IP literals: the only
+// forms a route key (verified domain) can take.
+func validRouteHost(h string) bool {
+	if net.ParseIP(strings.TrimSuffix(strings.TrimPrefix(h, "["), "]")) != nil {
+		return true
+	}
+	if len(h) > 253 {
+		return false
+	}
+	for _, l := range strings.Split(h, ".") {
+		if !hostLabelRE.MatchString(l) {
+			return false
+		}
+	}
+	return true
 }
 
 // PeekHost reads an HTTP/1.x request head and returns its Host (without
@@ -80,6 +104,11 @@ func PeekHost(conn net.Conn, timeout time.Duration) (string, []byte, error) {
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
 	if host == "" {
 		return "", rc.buf.Bytes(), errors.New("request without Host")
+	}
+	// http.ReadRequest does not validate Host; route keys must be DNS
+	// names or IP literals.
+	if !validRouteHost(host) {
+		return "", rc.buf.Bytes(), errors.New("invalid Host")
 	}
 	return host, rc.buf.Bytes(), nil
 }

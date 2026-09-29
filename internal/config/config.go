@@ -197,7 +197,6 @@ type UpdateConfig struct {
 	Channel       string `yaml:"channel"`
 	TrustedRoot   string `yaml:"trusted_root"`
 	SlotsDir      string `yaml:"slots_dir"`
-	AutoStage     bool   `yaml:"auto_stage"`
 }
 
 type SecretsConfig struct {

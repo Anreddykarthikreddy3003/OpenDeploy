@@ -3,6 +3,7 @@ on:
   push:
     branches: [main, "claude/**"]
   pull_request:
+  workflow_call: # release gate (release.yml)
 permissions:
   contents: read
 jobs:

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { NavLink, Route, Routes } from "react-router-dom";
-import { errorMessage, get, patch, post, put, del } from "../api/client";
+import { download, errorMessage, get, patch, post, put, del } from "../api/client";
 import type { AuditEvent, GitStatus, Job, SecretMeta, User } from "../api/types";
 import { useAuth } from "../auth";
 import { Alert, Badge, Button, Card, Code, CopyButton, EmptyState, Field, Input, Loading, PageHeader, Select, Toggle, cx, useToast } from "../components/ui";
@@ -59,6 +59,8 @@ function Yes({ ok, label }: { ok: boolean; label: string }) {
 }
 
 function Status() {
+  const { user } = useAuth();
+  const owner = user?.role === "owner";
   const q = useQuery({ queryKey: ["system"], queryFn: () => get<any>("/api/v2/system"), refetchInterval: 15000 });
   if (q.isLoading) return <Loading />;
   if (q.error) return <Alert>{errorMessage(q.error)}</Alert>;
@@ -137,8 +139,82 @@ function Status() {
             {s.audit.broken_at ? <p className="mt-2 text-xs text-red-300">Chain broken at event #{s.audit.broken_at}</p> : null}
           </Card>
         )}
+        {owner && <Diagnostics />}
+        {owner && <IncidentResponse />}
       </div>
     </div>
+  );
+}
+
+function IncidentResponse() {
+  const toast = useToast();
+  const [busy, setBusy] = useState("");
+  const act = async (key: string, question: string, path: string, done: (r: any) => string) => {
+    if (!confirm(question)) return;
+    setBusy(key);
+    try {
+      toast("green", done(await post(path)));
+    } catch (e) {
+      toast("red", errorMessage(e));
+    } finally {
+      setBusy("");
+    }
+  };
+  return (
+    <Card title="Incident response">
+      <p className="mb-3 text-sm text-zinc-400">
+        If you suspect a compromise, follow runbook R1: preserve the off-host audit copy, then revoke credentials and rotate keys. Both actions are audited.
+      </p>
+      <div className="flex flex-wrap gap-2">
+        <Button
+          size="sm"
+          variant="danger"
+          loading={busy === "revoke"}
+          onClick={() =>
+            act("revoke", "Sign out every user except you and revoke every API token?", "/api/v2/system/incident/revoke-credentials", (r) => `Revoked ${r.sessions_revoked} sessions and ${r.tokens_revoked} API tokens`)
+          }
+        >
+          Revoke all sessions and tokens
+        </Button>
+        <Button
+          size="sm"
+          loading={busy === "kek"}
+          onClick={() => act("kek", "Re-encrypt every secret under a new key and destroy the old key?", "/api/v2/system/incident/rotate-kek", (r) => `Rotated the secrets key (${r.rewrapped} secrets re-wrapped)`)}
+        >
+          Rotate secrets key
+        </Button>
+      </div>
+    </Card>
+  );
+}
+
+function Diagnostics() {
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+  const run = async () => {
+    setBusy(true);
+    try {
+      const { blob, filename } = await download("/api/v2/system/support-bundle");
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+      toast("green", "Support bundle downloaded");
+    } catch (e) {
+      toast("red", errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Card title="Diagnostics" actions={<Button size="sm" loading={busy} onClick={run}>Download support bundle</Button>}>
+      <p className="text-sm text-zinc-400">
+        Host capabilities, update state, service status and recent service logs as one archive. Tokens, keys and passwords are redacted; it still describes your setup, so share it
+        only with people you trust. Requires re-authentication and is recorded in the audit log.
+      </p>
+    </Card>
   );
 }
 

@@ -40,6 +40,11 @@ const (
 	GitConnect    Action = "git.connect"
 	RemoteAdmin   Action = "remote_admin.manage"
 	SystemRead    Action = "system.read"
+	// SupportBundle collects redacted host diagnostics (configuration,
+	// service status and logs).
+	SupportBundle Action = "node.support_bundle"
+	// IncidentResponse revokes every credential and rotates the secrets KEK.
+	IncidentResponse Action = "node.incident"
 	// PrivilegedCreate creates a project in the Privileged/Unsafe class.
 	PrivilegedCreate Action = "project.create_privileged"
 )
@@ -82,6 +87,8 @@ var nodeActions = map[Action]string{
 	GitConnect:       model.RoleOwner,
 	RemoteAdmin:      model.RoleOwner,
 	PrivilegedCreate: model.RoleOwner,
+	SupportBundle:    model.RoleOwner,
+	IncidentResponse: model.RoleOwner,
 }
 
 // Sensitive actions require recent re-authentication (and MFA in
@@ -97,6 +104,8 @@ var sensitive = map[Action]bool{
 	ProjectTrust:     true,
 	GitConnect:       true,
 	PrivilegedCreate: true,
+	SupportBundle:    true,
+	IncidentResponse: true,
 }
 
 // Sensitive reports whether action needs recent re-authentication.
