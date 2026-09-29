@@ -27,6 +27,8 @@ jobs:
   go:
     needs: web
     runs-on: ubuntu-latest
+    env:
+      OPENDEPLOY_REQUIRE_CAPS: "1" # capability skips fail (internal/testcap)
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

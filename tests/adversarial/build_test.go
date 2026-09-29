@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"github.com/anreddykarthikreddy3003/opendeploy/internal/testcap"
 	"io"
 	"net"
 	"os"
@@ -103,7 +104,7 @@ func TestMaliciousBuilds(t *testing.T) {
 	t.Run("builds cannot reach host, metadata or private ranges", func(t *testing.T) {
 		gw, _ := dockerOut(t, "network", "inspect", "bridge", "-f", "{{(index .IPAM.Config 0).Gateway}}")
 		if net.ParseIP(gw) == nil {
-			t.Skip("CAPABILITY-BLOCKED: default docker bridge not found")
+			testcap.Blocked(t, "default docker bridge not found")
 		}
 		ln, err := net.Listen("tcp", "0.0.0.0:0")
 		if err != nil {
@@ -125,7 +126,7 @@ func TestMaliciousBuilds(t *testing.T) {
 		network.Flush(context.Background(), "")
 		ctl := fmt.Sprintf("FROM alpine:3.20\nRUN nc -z -w 3 %s %d && echo CONTROL-%s\n", gw, port, ids.Token(4))
 		if out, err := buildWith(t, ex, ctl, nil); err != nil {
-			t.Skipf("CAPABILITY-BLOCKED: build steps cannot reach the host even without policy (%v)\n%s", err, out)
+			testcap.Blocked(t, "build steps cannot reach the host even without policy (%v)\n%s", err, out)
 		}
 		svc := &network.Service{StateFile: t.TempDir() + "/p.json", BuildBridges: []string{"docker0"}}
 		if err := svc.Init(context.Background()); err != nil {
@@ -146,7 +147,7 @@ func TestUntrustedBuildSandbox(t *testing.T) {
 	need(t)
 	info, _ := dockerOut(t, "info", "--format", "{{json .Runtimes}}")
 	if !strings.Contains(info, "runsc") {
-		t.Skip("CAPABILITY-BLOCKED: docker has no runsc runtime (install gVisor)")
+		testcap.Blocked(t, "docker has no runsc runtime (install gVisor)")
 	}
 	ex := &builder.SandboxedBuildKit{Image: "moby/buildkit:v0.24.0-rootless", Runtime: "runsc", Network: "bridge"}
 	out, err := buildWith(t, ex, "FROM alpine:3.20\nRUN dmesg 2>&1 | head -3 > /kernel.txt || true\nRUN cat /proc/version > /version.txt\n", nil)

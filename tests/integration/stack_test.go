@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/anreddykarthikreddy3003/opendeploy/internal/testcap"
 	"io"
 	"net"
 	"net/http"
@@ -84,7 +85,7 @@ func nonLoopbackIP(t *testing.T) string {
 			return ipn.IP.String()
 		}
 	}
-	t.Skip("no non-loopback IPv4 address for fake workloads")
+	testcap.Blocked(t, "no non-loopback IPv4 address for fake workloads")
 	return ""
 }
 

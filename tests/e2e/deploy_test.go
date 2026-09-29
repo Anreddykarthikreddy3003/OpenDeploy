@@ -13,6 +13,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/anreddykarthikreddy3003/opendeploy/internal/testcap"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -96,10 +97,10 @@ func tarGz(t *testing.T, dir string) *bytes.Buffer {
 func TestDeployRealApps(t *testing.T) {
 	caddy, err := exec.LookPath("caddy")
 	if err != nil {
-		t.Skip("caddy not on PATH")
+		testcap.Blocked(t, "caddy not on PATH")
 	}
 	if err := exec.Command("docker", "info").Run(); err != nil {
-		t.Skip("docker daemon unavailable")
+		testcap.Blocked(t, "docker daemon unavailable")
 	}
 	ctx := context.Background()
 	var log *slog.Logger

@@ -9,7 +9,7 @@ proof test runs in CI (PRD §30.1).
 | Status | Meaning |
 |---|---|
 | **Proven** | A test asserts the negative outcome (the attack fails). It runs in CI on every push. |
-| **Proven (cap)** | Proven wherever the host can enforce the control (gVisor, nftables, KVM, root). Elsewhere the test is skipped with an explicit capability reason and never silently passes. The CI runners have these capabilities. |
+| **Proven (cap)** | Proven wherever the host can enforce the control (gVisor, nftables, KVM, root). Elsewhere the test is skipped with an explicit capability reason and never silently passes. The CI runners have these capabilities and set `OPENDEPLOY_REQUIRE_CAPS=1`, so on them a capability skip fails the build (`internal/testcap`). |
 | **Design** | A structural property with no runtime path to test, such as a component that simply has no such API. The structure itself is covered by tests where possible. |
 | **External** | Depends on something outside the repository: an external pen test, provider features, or organisational key custody. |
 

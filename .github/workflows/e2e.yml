@@ -10,6 +10,8 @@ jobs:
   deploy-real-apps:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      OPENDEPLOY_REQUIRE_CAPS: "1" # capability skips fail (internal/testcap)
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

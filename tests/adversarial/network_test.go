@@ -9,6 +9,7 @@ package adversarial
 import (
 	"context"
 	"fmt"
+	"github.com/anreddykarthikreddy3003/opendeploy/internal/testcap"
 	"net"
 	"os"
 	"os/exec"
@@ -24,13 +25,13 @@ import (
 func need(t *testing.T) {
 	t.Helper()
 	if os.Geteuid() != 0 {
-		t.Skip("CAPABILITY-BLOCKED: requires root")
+		testcap.Blocked(t, "requires root")
 	}
 	if err := exec.Command("docker", "info").Run(); err != nil {
-		t.Skip("CAPABILITY-BLOCKED: docker unavailable")
+		testcap.Blocked(t, "docker unavailable")
 	}
 	if err := network.Probe(context.Background(), ""); err != nil {
-		t.Skip("CAPABILITY-BLOCKED: nftables unavailable: " + err.Error())
+		testcap.Blocked(t, "nftables unavailable: %v", err)
 	}
 }
 
@@ -171,7 +172,7 @@ func TestNetworkSegmentation(t *testing.T) {
 	})
 	t.Run("internet egress allowed (positive control)", func(t *testing.T) {
 		if !probe(t, attacker, "1.1.1.1:443") && !probe(t, attacker, "140.82.112.3:443") {
-			t.Skip("CAPABILITY-BLOCKED: this host has no direct internet egress to verify the positive control")
+			testcap.Blocked(t, "this host has no direct internet egress to verify the positive control")
 		}
 	})
 	t.Run("no-internet environment isolated", func(t *testing.T) {

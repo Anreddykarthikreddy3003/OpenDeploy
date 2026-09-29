@@ -12,6 +12,7 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"fmt"
+	"github.com/anreddykarthikreddy3003/opendeploy/internal/testcap"
 	"io"
 	"io/fs"
 	"net/http"
@@ -136,7 +137,7 @@ func journal(t *testing.T, unit string) {
 
 func TestInstalledNode(t *testing.T) {
 	if os.Geteuid() != 0 {
-		t.Skip("run as root on a host where the package is installed")
+		testcap.Blocked(t, "run as root on a host where the package is installed")
 	}
 	api := env("OPENDEPLOY_URL", "http://127.0.0.1:8080")
 
@@ -327,7 +328,7 @@ func TestInstalledNode(t *testing.T) {
 				}
 			}
 			if !serving() {
-				t.Skip("static app not deployed")
+				t.Fatal("static app not deployed; the deploy/static subtest must pass first")
 			}
 			// Caddy restarts on its own and comes back with only its
 			// bootstrap config: routemgr's watchdog reloads the routes.
