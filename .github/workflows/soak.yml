@@ -1,0 +1,45 @@
+name: soak
+# Nightly long soak of the control plane (tests/integration/soak_test.go):
+# many deploy rounds across projects plus a duplicated/reordered webhook
+# storm. Fails on resource growth that scales with load, an unconverged
+# queue, or replaced generations left running. ci runs a short smoke of the
+# same test on every push.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      rounds:
+        description: deploy rounds
+        default: "60"
+      projects:
+        description: concurrent projects per round
+        default: "24"
+      pushes:
+        description: distinct webhook pushes (each delivered twice)
+        default: "400"
+permissions:
+  contents: read
+jobs:
+  soak:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      OPENDEPLOY_REQUIRE_CAPS: "1"
+      SOAK_ROUNDS: ${{ inputs.rounds || '60' }}
+      SOAK_PROJECTS: ${{ inputs.projects || '24' }}
+      SOAK_PUSHES: ${{ inputs.pushes || '400' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: soak
+        run: |
+          set -o pipefail
+          go test -tags soak -count=1 -timeout 140m -run TestSoak -v ./tests/integration/ 2>&1 | grep --line-buffered -v 'level=' | tee soak.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: soak-log
+          path: soak.log

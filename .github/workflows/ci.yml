@@ -42,6 +42,8 @@ jobs:
         run: tests/s3/minio.sh | sed 's/^export //' >> "$GITHUB_ENV"
       - name: test
         run: go test -race -count=1 ./...
+      - name: soak smoke (bounded goroutines, fds, heap; converged queue; drained generations)
+        run: go test -tags soak -count=1 -timeout 20m -run TestSoak -v ./tests/integration/
       - uses: actions/download-artifact@v4
         with:
           name: web-dist

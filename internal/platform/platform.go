@@ -108,6 +108,9 @@ type Platform struct {
 	nodeID string
 
 	capMu    sync.Mutex
+	drainMu  sync.Mutex
+	draining map[string]bool // deployments being drained by the reconciler
+	drainWG  sync.WaitGroup
 	caps     *HostCaps
 	capsAt   time.Time
 	workerID string

@@ -638,3 +638,52 @@ func TestCronRuns(t *testing.T) {
 		t.Fatalf("cron row %s", w.State)
 	}
 }
+
+// A replaced generation is drained by the reconciler even when the
+// in-process drain after promotion never runs (platformd restarted within
+// the drain delay, or the promotion was resumed after a crash). The live
+// deployment and an in-flight candidate keep their workloads.
+func TestReplacedGenerationDrainedDurably(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	d1 := h.deploy()
+	h.run(d1.ID)
+	d2 := h.deploy()
+	h.run(d2.ID)
+	if h.current() != d2.ID {
+		t.Fatalf("current %s", h.current())
+	}
+	cand := h.driveToHealthChecking(t) // a third generation, not yet promoted
+	old, _ := h.s.WorkloadsForDeployment(ctx, d1.ID)
+	if len(old) == 0 || old[0].State == "stopped" {
+		t.Fatalf("precondition: generation 1 still running (in-process drain waits): %+v", old)
+	}
+	// Within the grace period nothing is touched.
+	if err := h.p.drainReplaced(ctx, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	h.p.drainWG.Wait()
+	if ws, err := h.s.WorkloadsForDeployment(ctx, d1.ID); err != nil || len(ws) == 0 || ws[0].State == "stopped" {
+		t.Fatalf("drained before the grace period: %+v %v", ws, err)
+	}
+	if err := h.p.drainReplaced(ctx, time.Now().Add(drainGrace+time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	h.p.drainWG.Wait()
+	for _, w := range old {
+		if row, _ := h.s.GetWorkload(ctx, w.ID); row.State != "stopped" {
+			t.Fatalf("replaced workload %s still %s", w.ID, row.State)
+		}
+		if _, err := h.rt.Inspect(ctx, w.ID); err == nil {
+			t.Fatalf("replaced workload %s still exists in the runtime", w.ID)
+		}
+	}
+	for _, id := range []string{d2.ID, cand.ID} {
+		ws, _ := h.s.WorkloadsForDeployment(ctx, id)
+		for _, w := range ws {
+			if w.State == "stopped" {
+				t.Fatalf("workload %s of %s was drained", w.ID, id)
+			}
+		}
+	}
+}

@@ -127,6 +127,9 @@ func (p *Platform) ReconcileOnce(ctx context.Context) error {
 	if err := p.removeOrphans(ctx); err != nil {
 		errs = append(errs, fmt.Errorf("orphans: %w", err))
 	}
+	if err := p.drainReplaced(ctx, time.Now()); err != nil {
+		errs = append(errs, fmt.Errorf("drain: %w", err))
+	}
 	return errors.Join(errs...)
 }
 
@@ -280,6 +283,79 @@ func routeKey(t router.Table) string {
 	}
 	sort.Strings(parts)
 	return strings.Join(parts, "\n")
+}
+
+// drainGrace is how long a new deployment must have been live before the
+// reconciler stops the workloads it replaced.
+const drainGrace = 30 * time.Second
+
+// drainReplaced stops the workloads of finished deployments that are no
+// longer current once the current deployment has been live for drainGrace.
+// Promotion drains the previous version itself after a short in-process
+// delay; this makes draining durable across platformd restarts and resumed
+// promotions, which would otherwise leave old generations running (and
+// counted as wanted) indefinitely. Candidates in flight and READY
+// deployments awaiting a manual promotion are not terminal and keep their
+// workloads. Stops run in the background so a slow workload cannot stall
+// the reconcile pass.
+func (p *Platform) drainReplaced(ctx context.Context, now time.Time) error {
+	rows, err := p.Store.LiveWorkloads(ctx)
+	if err != nil {
+		return err
+	}
+	envs := map[string]*store.Environment{}
+	liveSince := map[string]time.Time{} // environment -> when its current deployment went live
+	seen := map[string]bool{}
+	for _, w := range rows {
+		if w.DeploymentID == "" || seen[w.DeploymentID] {
+			continue
+		}
+		seen[w.DeploymentID] = true
+		env, ok := envs[w.EnvironmentID]
+		if !ok {
+			env, _ = p.Store.GetEnvironment(ctx, w.EnvironmentID)
+			envs[w.EnvironmentID] = env
+			if env != nil && env.CurrentDeploymentID != "" {
+				if cur, err := p.Store.GetDeployment(ctx, env.CurrentDeploymentID); err == nil {
+					ts := cur.FinishedAt
+					if ts == "" {
+						ts = cur.UpdatedAt
+					}
+					liveSince[env.ID] = state.ParseTime(ts)
+				}
+			}
+		}
+		if env == nil || env.CurrentDeploymentID == "" || env.CurrentDeploymentID == w.DeploymentID {
+			continue
+		}
+		if since, ok := liveSince[env.ID]; !ok || now.Sub(since) < drainGrace {
+			continue
+		}
+		d, err := p.Store.GetDeployment(ctx, w.DeploymentID)
+		if err != nil || !d.Status.Terminal() {
+			continue
+		}
+		p.drainMu.Lock()
+		if p.draining == nil {
+			p.draining = map[string]bool{}
+		}
+		busy := p.draining[d.ID]
+		p.draining[d.ID] = true
+		p.drainMu.Unlock()
+		if busy {
+			continue
+		}
+		p.Log.Info("draining replaced deployment", "deployment", d.ID, "environment", env.ID)
+		p.drainWG.Add(1)
+		go func(id string) {
+			defer p.drainWG.Done()
+			p.stopDeploymentWorkloads(context.WithoutCancel(ctx), id, true)
+			p.drainMu.Lock()
+			delete(p.draining, id)
+			p.drainMu.Unlock()
+		}(d.ID)
+	}
+	return nil
 }
 
 // removeOrphans stops managed workloads that no deployment wants.
