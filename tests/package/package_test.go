@@ -375,8 +375,11 @@ type ownerState struct {
 // still builds and deploys.
 func TestUpgradedNode(t *testing.T) {
 	p := os.Getenv("OPENDEPLOY_PKG_STATE")
-	if os.Geteuid() != 0 || p == "" {
-		testcap.Blocked(t, "run as root after a package upgrade with OPENDEPLOY_PKG_STATE")
+	if p == "" {
+		t.Skip("not an upgrade run: OPENDEPLOY_PKG_STATE is set by package.yml's upgrade job")
+	}
+	if os.Geteuid() != 0 {
+		testcap.Blocked(t, "run as root on the upgraded node")
 	}
 	var st ownerState
 	if b, err := os.ReadFile(p); err != nil || json.Unmarshal(b, &st) != nil {

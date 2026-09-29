@@ -96,7 +96,7 @@ jobs:
           sudo systemctl start opendeploy.target
           opendeployctl version
       - name: installed node works end to end
-        run: sudo -E env "PATH=$PATH" go test -tags pkginstall -count=1 -timeout 30m -v ./tests/package/
+        run: sudo -E env "PATH=$PATH" go test -tags pkginstall -count=1 -timeout 30m -v -run TestInstalledNode ./tests/package/
       - name: re-install upgrades into the other slot and keeps state
         run: |
           sudo /usr/lib/opendeploy/release/packaging/linux/install.sh --force
