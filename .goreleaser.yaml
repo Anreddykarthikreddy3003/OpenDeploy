@@ -74,7 +74,7 @@ nfpms:
     description: Local-first, security-hardened deployment platform (control plane, builders, runtime, router).
     section: admin
     priority: optional
-    dependencies: [systemd, nftables, curl]
+    dependencies: [systemd, nftables, curl, "git (>= 1:2.37)"]
     recommends: [containerd, uidmap]
     suggests: [runsc]
     contents:
@@ -88,7 +88,7 @@ nfpms:
       preremove: packaging/linux/nfpm/preremove.sh
     overrides:
       rpm:
-        dependencies: [systemd, nftables, curl, shadow-utils]
+        dependencies: [systemd, nftables, curl, shadow-utils, "git >= 2.37"]
         recommends: [containerd]
 
 checksum:

@@ -59,6 +59,12 @@ command -v caddy >/dev/null 2>&1 || missing="$missing caddy"
 { command -v buildkitd && command -v buildctl; } >/dev/null 2>&1 || missing="$missing buildkit"
 command -v rootlesskit >/dev/null 2>&1 || missing="$missing rootlesskit"
 command -v newuidmap >/dev/null 2>&1 || missing="$missing uidmap"
+# git >= 2.37 pins source fetches to the validated address (SSRF defence).
+if ! command -v git >/dev/null 2>&1; then
+	missing="$missing git"
+elif ! git version | awk '{split($3, v, "."); exit !(v[1] > 2 || (v[1] == 2 && v[2] >= 37))}'; then
+	missing="$missing git>=2.37"
+fi
 if [ -n "$missing" ]; then
 	warn "missing prerequisites:$missing"
 	warn "install them (e.g. apt install nftables containerd uidmap; Caddy and BuildKit from their official releases) and re-run"

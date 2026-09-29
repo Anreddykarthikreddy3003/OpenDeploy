@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -44,9 +45,17 @@ var ErrUnsafeURL = errors.New("clone URL must be https to a public host")
 
 // ValidateCloneURL enforces https and a public destination (SSRF defence).
 func ValidateCloneURL(ctx context.Context, raw string, allowed []string) (*url.URL, error) {
+	u, _, err := resolveCloneURL(ctx, raw, allowed)
+	return u, err
+}
+
+// resolveCloneURL validates raw and returns the public addresses its host
+// resolved to, so the fetch can be pinned to exactly those (a second DNS
+// answer, e.g. from a rebinding server, is never used).
+func resolveCloneURL(ctx context.Context, raw string, allowed []string) (*url.URL, []netip.Addr, error) {
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-		return nil, ErrUnsafeURL
+		return nil, nil, ErrUnsafeURL
 	}
 	host := u.Hostname()
 	if len(allowed) > 0 {
@@ -57,27 +66,83 @@ func ValidateCloneURL(ctx context.Context, raw string, allowed []string) (*url.U
 			}
 		}
 		if !ok {
-			return nil, fmt.Errorf("%w: host %s not allowed", ErrUnsafeURL, host)
+			return nil, nil, fmt.Errorf("%w: host %s not allowed", ErrUnsafeURL, host)
 		}
 	}
 	if ip, err := netip.ParseAddr(host); err == nil {
 		if !PublicAddr(ip) {
-			return nil, ErrUnsafeURL
+			return nil, nil, ErrUnsafeURL
 		}
-		return u, nil
+		return u, nil, nil
 	}
 	rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	addrs, err := net.DefaultResolver.LookupNetIP(rctx, "ip", host)
 	if err != nil {
-		return nil, fmt.Errorf("resolve %s: %w", host, err)
+		return nil, nil, fmt.Errorf("resolve %s: %w", host, err)
+	}
+	if len(addrs) == 0 {
+		return nil, nil, fmt.Errorf("resolve %s: no addresses", host)
 	}
 	for _, a := range addrs {
 		if !PublicAddr(a) {
-			return nil, fmt.Errorf("%w: %s resolves to non-public %s", ErrUnsafeURL, host, a)
+			return nil, nil, fmt.Errorf("%w: %s resolves to non-public %s", ErrUnsafeURL, host, a)
 		}
 	}
-	return u, nil
+	return u, addrs, nil
+}
+
+var (
+	pinOnce sync.Once
+	pinErr  error
+)
+
+// gitCanPin reports whether the installed git honours http.curloptResolve
+// (git 2.37 and later).
+func gitCanPin() error {
+	pinOnce.Do(func() {
+		out, err := exec.Command("git", "version").Output()
+		if err != nil {
+			pinErr = fmt.Errorf("git version: %w", err)
+			return
+		}
+		pinErr = checkGitVersion(string(out))
+	})
+	return pinErr
+}
+
+func checkGitVersion(out string) error {
+	var major, minor int
+	f := strings.Fields(out)
+	if len(f) < 3 {
+		return fmt.Errorf("unrecognised git version %q", strings.TrimSpace(out))
+	}
+	if _, err := fmt.Sscanf(f[2], "%d.%d", &major, &minor); err != nil {
+		return fmt.Errorf("unrecognised git version %q", f[2])
+	}
+	if major < 2 || (major == 2 && minor < 37) {
+		return fmt.Errorf("git %s is too old: 2.37 or later is required to pin fetches to validated addresses", f[2])
+	}
+	return nil
+}
+
+// pinResolve renders curl --resolve entries that pin host to the
+// validated addresses.
+func pinResolve(u *url.URL, addrs []netip.Addr) string {
+	port := u.Port()
+	if port == "" {
+		port = "443"
+	}
+	var ips []string
+	for _, a := range addrs {
+		a = a.Unmap()
+		if a.Is6() {
+			ips = append(ips, "["+a.String()+"]")
+		} else {
+			ips = append(ips, a.String())
+		}
+	}
+	return u.Hostname() + ":" + port + ":" + strings.Join(ips, ",")
 }
 
 // PublicAddr reports whether ip is a globally routable unicast address
@@ -124,7 +189,8 @@ func Fetch(ctx context.Context, dir string, src Source) (*Result, error) {
 	if strings.Contains(src.Ref, "..") {
 		return nil, fmt.Errorf("invalid ref %q", src.Ref)
 	}
-	if _, err := ValidateCloneURL(ctx, src.CloneURL, src.AllowedHosts); err != nil {
+	u, addrs, err := resolveCloneURL(ctx, src.CloneURL, src.AllowedHosts)
+	if err != nil {
 		return nil, err
 	}
 	if err := os.MkdirAll(dir, 0o750); err != nil {
@@ -147,6 +213,16 @@ func Fetch(ctx context.Context, dir string, src Source) (*Result, error) {
 		{"credential.helper", ""},
 		{"http.followRedirects", "false"},
 		{"safe.directory", dir},
+	}
+	// Connect only to the addresses validated above (DNS rebinding). With
+	// an egress proxy the proxy resolves, under the operator's policy.
+	if len(addrs) > 0 && os.Getenv("HTTPS_PROXY") == "" {
+		// Older git ignores the key silently: fail closed instead of
+		// fetching unpinned.
+		if err := gitCanPin(); err != nil {
+			return nil, err
+		}
+		cfg = append(cfg, [2]string{"http.curloptResolve", pinResolve(u, addrs)})
 	}
 	if src.Token != "" {
 		basic := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + src.Token))

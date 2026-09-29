@@ -53,6 +53,10 @@ type Server struct {
 	// Ready reports the Tier-0 services that are not answering (name ->
 	// error); nil means only the database is checked.
 	Ready         func(ctx context.Context) map[string]string
+	readyMu       sync.Mutex
+	readyAt       time.Time
+	readyDown     map[string]string
+	readyBusy     bool
 	allowed       []netip.Prefix
 	limiter       *limiter
 	authLimiter   *limiter

@@ -2,8 +2,15 @@ package git
 
 import (
 	"context"
+	"fmt"
+	"net"
 	"net/netip"
+	"net/url"
+	"os"
+	"os/exec"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestPublicAddr(t *testing.T) {
@@ -49,5 +56,61 @@ func TestFetchRejectsBadInput(t *testing.T) {
 func TestRedact(t *testing.T) {
 	if got := redact("fatal: token ghs_abc leaked", "ghs_abc"); got != "fatal: token [REDACTED] leaked" {
 		t.Fatal(got)
+	}
+}
+
+func TestPinResolve(t *testing.T) {
+	u, _ := url.Parse("https://git.example.com/o/r.git")
+	got := pinResolve(u, []netip.Addr{netip.MustParseAddr("140.82.112.3"), netip.MustParseAddr("2606:50c0:8000::153")})
+	if got != "git.example.com:443:140.82.112.3,[2606:50c0:8000::153]" {
+		t.Fatal(got)
+	}
+	u, _ = url.Parse("https://git.example.com:8443/o/r.git")
+	if got := pinResolve(u, []netip.Addr{netip.MustParseAddr("140.82.112.3")}); got != "git.example.com:8443:140.82.112.3" {
+		t.Fatal(got)
+	}
+}
+
+// The fetch is pinned to the validated address: git connects where
+// http.curloptResolve says, never to a fresh DNS answer (rebinding).
+func TestGitHonoursResolvePin(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	var hits atomic.Int32
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			hits.Add(1)
+			c.Close()
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+	host := "pinned.opendeploy.invalid" // never resolvable through DNS
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-c", fmt.Sprintf("http.curloptResolve=%s:%d:127.0.0.1", host, port),
+		"ls-remote", fmt.Sprintf("https://%s:%d/o/r.git", host, port))
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "HTTPS_PROXY=", "https_proxy=", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
+	out, _ := cmd.CombinedOutput()
+	if hits.Load() == 0 {
+		t.Fatalf("git ignored http.curloptResolve (needs git >= 2.37): %s", out)
+	}
+}
+
+func TestCheckGitVersion(t *testing.T) {
+	for out, ok := range map[string]bool{"git version 2.43.0\n": true, "git version 2.37.1": true, "git version 3.0.0": true,
+		"git version 2.34.1": false, "git version 1.9": false, "garbage": false, "git version 2.39.5 (Apple Git-154)": true} {
+		if err := checkGitVersion(out); (err == nil) != ok {
+			t.Errorf("%q: %v", out, err)
+		}
 	}
 }

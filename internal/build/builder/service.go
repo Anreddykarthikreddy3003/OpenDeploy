@@ -651,6 +651,7 @@ func (s *Service) extractArchive(depID, dest string) (string, error) {
 	tr := tar.NewReader(gz)
 	var total int64
 	count := 0
+	var links []string
 	for {
 		h, err := tr.Next()
 		if errors.Is(err, io.EOF) {
@@ -673,6 +674,10 @@ func (s *Service) extractArchive(depID, dest string) (string, error) {
 			}
 		}
 		target := filepath.Join(dest, filepath.FromSlash(name))
+		// Never write through a symlink an earlier entry created.
+		if err := noSymlinkParents(dest, target); err != nil {
+			return "", fmt.Errorf("archive entry %q: %w", h.Name, err)
+		}
 		switch h.Typeflag {
 		case tar.TypeDir:
 			if err := os.MkdirAll(target, 0o750); err != nil {
@@ -713,12 +718,117 @@ func (s *Service) extractArchive(depID, dest string) (string, error) {
 			if err := os.Symlink(h.Linkname, target); err != nil {
 				return "", err
 			}
+			links = append(links, target)
 		default:
 			return "", fmt.Errorf("archive entry %q has unsupported type", h.Name)
 		}
 	}
+	// Symlink targets were checked lexically; a chain through another
+	// symlink (d -> ., e -> d/..) can still point outside, so resolve each
+	// on disk now that the tree is complete.
+	for _, l := range links {
+		if err := containedLink(dest, l); err != nil {
+			return "", err
+		}
+	}
 	_ = os.Remove(p)
 	return "archive-" + depID, nil
+}
+
+// noSymlinkParents reports an error if any directory between root and
+// target's parent is a symlink.
+func noSymlinkParents(root, target string) error {
+	rel, err := filepath.Rel(root, filepath.Dir(target))
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return errors.New("path escapes the source tree")
+	}
+	if rel == "." {
+		return nil
+	}
+	cur := root
+	for _, part := range strings.Split(rel, string(os.PathSeparator)) {
+		cur = filepath.Join(cur, part)
+		fi, err := os.Lstat(cur)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return errors.New("path goes through a symlink")
+		}
+	}
+	return nil
+}
+
+// containedLink rejects a symlink that resolves outside root, following
+// links inside the tree and applying ".." after each one, the way the
+// kernel will. Components that do not exist yet are taken lexically, so a
+// dangling link still cannot point outside (it could become live later,
+// e.g. when the builder creates files next to the tree).
+func containedLink(root, link string) error {
+	rootReal, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(root, link)
+	if err != nil {
+		return err
+	}
+	if _, err := resolveIn(rootReal, rootReal, rel, 0); err != nil {
+		return fmt.Errorf("symlink %q: %w", filepath.ToSlash(rel), err)
+	}
+	return nil
+}
+
+var errEscapes = errors.New("escapes the source tree")
+
+// resolveIn resolves the relative path rel from dir inside root (both real
+// paths) and fails if any step leaves root.
+func resolveIn(root, dir, rel string, depth int) (string, error) {
+	if depth > 40 {
+		return "", errors.New("too many levels of symbolic links")
+	}
+	inside := func(p string) bool { return p == root || strings.HasPrefix(p, root+string(os.PathSeparator)) }
+	cur := dir
+	for _, comp := range strings.Split(filepath.ToSlash(rel), "/") {
+		switch comp {
+		case "", ".":
+			continue
+		case "..":
+			cur = filepath.Dir(cur)
+			if !inside(cur) {
+				return "", errEscapes
+			}
+			continue
+		}
+		next := filepath.Join(cur, comp)
+		fi, err := os.Lstat(next)
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			cur = next
+		case err != nil:
+			return "", err
+		case fi.Mode()&os.ModeSymlink != 0:
+			tgt, err := os.Readlink(next)
+			if err != nil {
+				return "", err
+			}
+			if filepath.IsAbs(tgt) {
+				return "", errEscapes
+			}
+			if cur, err = resolveIn(root, cur, tgt, depth+1); err != nil {
+				return "", err
+			}
+		default:
+			cur = next
+		}
+		if !inside(cur) {
+			return "", errEscapes
+		}
+	}
+	return cur, nil
 }
 
 func (s *Service) status(j *job, after int64) *Status {

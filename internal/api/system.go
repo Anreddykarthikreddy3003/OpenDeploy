@@ -161,9 +161,7 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		down["platformd"] = "degraded: " + d
 	}
 	if s.Ready != nil {
-		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-		defer cancel()
-		for name, err := range s.Ready(ctx) {
+		for name, err := range s.readiness() {
 			down[name] = err
 		}
 	}
@@ -177,6 +175,31 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ready": true})
+}
+
+// readiness probes the Tier-0 services at most once a second, however
+// often the unauthenticated endpoint is asked. One probe runs at a time,
+// detached from any caller's request (a client giving up must not poison
+// the shared result); callers arriving meanwhile get the previous result.
+func (s *Server) readiness() map[string]string {
+	s.readyMu.Lock()
+	if s.readyBusy || (!s.readyAt.IsZero() && time.Since(s.readyAt) < time.Second) {
+		out := s.readyDown
+		if s.readyAt.IsZero() { // no result yet: never report ready unprobed
+			out = map[string]string{"platformd": "first readiness probe in progress"}
+		}
+		s.readyMu.Unlock()
+		return out
+	}
+	s.readyBusy = true
+	s.readyMu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	down := s.Ready(ctx)
+	cancel()
+	s.readyMu.Lock()
+	s.readyDown, s.readyAt, s.readyBusy = down, time.Now(), false
+	s.readyMu.Unlock()
+	return down
 }
 
 // spa serves the embedded dashboard with index.html fallback.

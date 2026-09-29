@@ -195,16 +195,32 @@ func TestArchiveSourceSafety(t *testing.T) {
 		"abs-symlink": {{Name: "l", Typeflag: tar.TypeSymlink, Linkname: "/etc/passwd"}},
 		"escape-link": {{Name: "a/l", Typeflag: tar.TypeSymlink, Linkname: "../../x"}},
 		"device":      {{Name: "d", Typeflag: tar.TypeBlock}},
+		// Chained symlinks: each is contained lexically, together they point
+		// at the tree's parent.
+		"chained-link":           {{Name: "d", Typeflag: tar.TypeSymlink, Linkname: "."}, {Name: "e", Typeflag: tar.TypeSymlink, Linkname: "d/.."}},
+		"chained-link-reordered": {{Name: "e", Typeflag: tar.TypeSymlink, Linkname: "d/.."}, {Name: "d", Typeflag: tar.TypeSymlink, Linkname: "."}},
+		"write-through-link": {{Name: "d", Typeflag: tar.TypeSymlink, Linkname: "."}, {Name: "e", Typeflag: tar.TypeSymlink, Linkname: "d/.."},
+			{Name: "e/escaped", Typeflag: tar.TypeReg}},
+		// Dangling now, live once the builder creates ws/secrets next to src.
+		"dangling-chain":         {{Name: "d", Typeflag: tar.TypeSymlink, Linkname: "."}, {Name: "e", Typeflag: tar.TypeSymlink, Linkname: "d/../secrets/TOKEN"}},
+		"write-through-dir-link": {{Name: "sub/", Typeflag: tar.TypeDir}, {Name: "l", Typeflag: tar.TypeSymlink, Linkname: "sub"}, {Name: "l/x", Typeflag: tar.TypeReg}},
 	}
 	for name, hs := range bad {
 		dep := ids.New("dep")
-		writeArchive(t, filepath.Join(s.cfg.SourcesDir, dep+".tar.gz"), hs, map[string]string{"../evil": "x"})
-		if _, err := s.extractArchive(dep, filepath.Join(t.TempDir(), "src")); err == nil {
+		parent := t.TempDir()
+		writeArchive(t, filepath.Join(s.cfg.SourcesDir, dep+".tar.gz"), hs, map[string]string{"../evil": "x", "e/escaped": "pwned"})
+		if _, err := s.extractArchive(dep, filepath.Join(parent, "src")); err == nil {
 			t.Errorf("%s accepted", name)
+		}
+		if _, err := os.Stat(filepath.Join(parent, "escaped")); err == nil {
+			t.Errorf("%s wrote outside the source tree", name)
 		}
 	}
 	dep := ids.New("dep")
-	writeArchive(t, filepath.Join(s.cfg.SourcesDir, dep+".tar.gz"), []tar.Header{{Name: "public/index.html", Typeflag: tar.TypeReg}, {Name: "public/link.html", Typeflag: tar.TypeSymlink, Linkname: "index.html"}},
+	writeArchive(t, filepath.Join(s.cfg.SourcesDir, dep+".tar.gz"), []tar.Header{{Name: "public/index.html", Typeflag: tar.TypeReg}, {Name: "public/link.html", Typeflag: tar.TypeSymlink, Linkname: "index.html"},
+		// Legitimate: links through links that stay inside, and a dangling link inside.
+		{Name: "cur", Typeflag: tar.TypeSymlink, Linkname: "public"}, {Name: "docs/", Typeflag: tar.TypeDir},
+		{Name: "docs/home", Typeflag: tar.TypeSymlink, Linkname: "../cur/index.html"}, {Name: "docs/later", Typeflag: tar.TypeSymlink, Linkname: "../build/out.js"}},
 		map[string]string{"public/index.html": "<p>ok</p>"})
 	if _, err := s.extractArchive(dep, filepath.Join(t.TempDir(), "src")); err != nil {
 		t.Fatal(err)
