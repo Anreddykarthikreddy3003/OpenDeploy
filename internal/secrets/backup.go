@@ -117,6 +117,9 @@ func RegisterBackup(srv *ipc.Server, s *Service, staging string) {
 		if err := os.WriteFile(tmp, sealed, 0o640); err != nil {
 			return nil, err
 		}
+		if err := backup.Shared(tmp); err != nil {
+			return nil, err
+		}
 		if err := os.Rename(tmp, dst); err != nil {
 			return nil, err
 		}

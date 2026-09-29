@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -48,6 +49,15 @@ type Store struct {
 func NewStore(root string, lim Limits) (*Store, error) {
 	for _, d := range []string{"blobs/sha256", "static", "tmp", "refs"} {
 		if err := os.MkdirAll(filepath.Join(root, d), 0o750); err != nil {
+			return nil, err
+		}
+	}
+	// The edge (Caddy, another user) serves static artifacts straight from
+	// static/<digest>: it may traverse root and static/ but not list them,
+	// and everything else in the store stays private to artifactd. Modes
+	// are set explicitly because services run with umask 0077.
+	for _, d := range []string{"", "static"} {
+		if err := os.Chmod(filepath.Join(root, d), 0o711); err != nil {
 			return nil, err
 		}
 	}
@@ -475,7 +485,9 @@ func (s *Store) IngestStatic(r io.Reader) (*Info, error) {
 	if err := os.Rename(tmpDir, final); err != nil {
 		return nil, err
 	}
-	_ = os.Chmod(final, 0o755)
+	if err := publishTree(final); err != nil {
+		return nil, err
+	}
 	info := &Info{Kind: "static", Digest: digest, Size: total, Files: files}
 	if _, err := os.Stat(filepath.Join(final, "index.html")); err != nil {
 		info.Warnings = append(info.Warnings, "static artifact has no index.html at its root")
@@ -552,3 +564,20 @@ var (
 	repoRE = regexp.MustCompile(`^[a-z0-9]+([._-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*){0,3}$`)
 	tagRE  = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$`)
 )
+
+// publishTree makes a static artifact world-readable (its parents are
+// traverse-only), whatever the process umask was when it was extracted.
+func publishTree(dir string) error {
+	return filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return os.Chmod(p, 0o755)
+		}
+		if d.Type().IsRegular() {
+			return os.Chmod(p, 0o644)
+		}
+		return nil
+	})
+}

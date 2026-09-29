@@ -87,6 +87,7 @@ func NewPlatformd(ctx context.Context, n *config.Node, log *slog.Logger, c *Clie
 		requireMFA = *o.RequireMFA
 	}
 	srv := api.New(p, sealer, o.UI, requireMFA, boot)
+	srv.Bootstrapped = func() { _ = os.Remove(BootstrapTokenPath(n)) }
 	return &Platformd{Store: st, Platform: p, API: srv}, nil
 }
 

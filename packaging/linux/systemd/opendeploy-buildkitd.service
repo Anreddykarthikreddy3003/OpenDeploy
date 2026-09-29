@@ -4,12 +4,17 @@ PartOf=opendeploy.target
 After=network-online.target
 
 [Service]
+# Extra trust anchors (enterprise TLS inspection): PEM files in /etc/opendeploy/ca.d.
+Environment=SSL_CERT_DIR=/etc/ssl/certs:/etc/opendeploy/ca.d
 Type=simple
 User=od-buildkit
 Group=od-buildkit
 # Rootless BuildKit: user namespaces via newuidmap (subuid/subgid ranges are
 # allocated by the installer). No privileged entitlements are ever enabled.
-ExecStart=/usr/bin/rootlesskit --net=slirp4netns --copy-up=/etc --disable-host-loopback /usr/bin/buildkitd --addr unix:///run/opendeploy/buildkit/buildkitd.sock --group od-buildkit --oci-worker-no-process-sandbox
+# --group 0: buildkitd resolves the socket group inside rootlesskit's user
+# namespace, where gid 0 is the host's od-buildkit group (builderd connects
+# through it); a group name would map to a subordinate gid instead.
+ExecStart=/usr/bin/rootlesskit --net=slirp4netns --copy-up=/etc --disable-host-loopback /usr/bin/buildkitd --addr unix:///run/opendeploy/buildkit/buildkitd.sock --group 0 --oci-worker-no-process-sandbox
 Restart=always
 RestartSec=3
 Environment=XDG_RUNTIME_DIR=/run/opendeploy/buildkit

@@ -28,6 +28,10 @@ func StagingFile(dir, id, component string) (string, error) {
 	return filepath.Join(dir, id+"-"+component), nil
 }
 
+// Shared gives a staging file the group-readable mode other services need
+// (services run with umask 0077, which would otherwise strip it).
+func Shared(path string) error { return os.Chmod(path, 0o640) }
+
 // TarDir writes dir as a tar stream: regular files, directories and
 // symlinks (stored, never followed). skip excludes relative paths.
 func TarDir(w io.Writer, dir string, skip func(rel string) bool) error {

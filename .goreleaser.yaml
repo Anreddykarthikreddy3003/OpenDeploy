@@ -35,6 +35,7 @@ builds:
   - {<<: *common, id: egressd, main: ./cmd/egressd, binary: bin/egressd, goos: [linux], goarch: [amd64, arm64]}
   - {<<: *common, id: relay-agent, main: ./cmd/relay-agent, binary: bin/relay-agent, goos: [linux], goarch: [amd64, arm64]}
   - {<<: *common, id: opendeploy-hostd, main: ./cmd/opendeploy-hostd, binary: bin/opendeploy-hostd, goos: [linux], goarch: [amd64, arm64]}
+  - {<<: *common, id: opendeploy-guest-agent, main: ./cmd/opendeploy-guest-agent, binary: bin/opendeploy-guest-agent, goos: [linux], goarch: [amd64, arm64]}
   - {<<: *common, id: opendeployctl-node, main: ./cmd/opendeployctl, binary: bin/opendeployctl, goos: [linux], goarch: [amd64, arm64]}
   - {<<: *common, id: opendeployctl, main: ./cmd/opendeployctl, binary: bin/opendeployctl, goos: [linux, darwin, windows], goarch: [amd64, arm64]}
   - {<<: *common, id: relay-server, main: ./relay-server/cmd/relay-server, binary: bin/relay-server, goos: [linux], goarch: [amd64, arm64]}
@@ -42,7 +43,7 @@ builds:
 archives:
   # Node release: everything a slot needs (hostd stages exactly this).
   - id: node
-    ids: [platformd, auditd, secretd, artifactd, builderd, runtimed, routemgr, egressd, relay-agent, opendeploy-hostd, opendeployctl-node]
+    ids: [platformd, auditd, secretd, artifactd, builderd, runtimed, routemgr, egressd, relay-agent, opendeploy-hostd, opendeploy-guest-agent, opendeployctl-node]
     formats: [tar.gz]
     name_template: "opendeploy_{{ .Version }}_{{ .Os }}-{{ .Arch }}"
     files: [LICENSE*, README.md, packaging/linux/install.sh, packaging/linux/**/*]
@@ -63,7 +64,7 @@ nfpms:
   # verified updater) and starts opendeploy.target.
   - id: node
     package_name: opendeploy
-    ids: [platformd, auditd, secretd, artifactd, builderd, runtimed, routemgr, egressd, relay-agent, opendeploy-hostd, opendeployctl-node]
+    ids: [platformd, auditd, secretd, artifactd, builderd, runtimed, routemgr, egressd, relay-agent, opendeploy-hostd, opendeploy-guest-agent, opendeployctl-node]
     formats: [deb, rpm]
     bindir: /usr/lib/opendeploy/release
     file_name_template: "{{ .PackageName }}_{{ .Version }}_{{ .Os }}-{{ .Arch }}"

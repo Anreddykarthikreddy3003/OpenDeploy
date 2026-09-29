@@ -16,13 +16,30 @@ import (
 	"io/fs"
 	"net/http"
 	"net/http/cookiejar"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/anreddykarthikreddy3003/opendeploy/internal/auth"
 )
+
+// loopbackJar treats the loopback API as a secure context, as browsers do:
+// the session is a Secure __Host- cookie even on http://127.0.0.1.
+type loopbackJar struct{ http.CookieJar }
+
+func secureURL(u *url.URL) *url.URL {
+	c := *u
+	c.Scheme = "https"
+	return &c
+}
+func (j loopbackJar) SetCookies(u *url.URL, cs []*http.Cookie) {
+	j.CookieJar.SetCookies(secureURL(u), cs)
+}
+func (j loopbackJar) Cookies(u *url.URL) []*http.Cookie { return j.CookieJar.Cookies(secureURL(u)) }
 
 var units = []string{"hostd", "auditd", "secretd", "artifactd", "buildkitd", "builderd", "runtimed", "caddy", "routemgr", "egressd", "platformd"}
 
@@ -182,7 +199,7 @@ func TestInstalledNode(t *testing.T) {
 			t.Fatalf("bootstrap token: %v", err)
 		}
 		jar, _ := cookiejar.New(nil)
-		c := &client{t: t, base: api, hc: &http.Client{Jar: jar, Timeout: 5 * time.Minute}}
+		c := &client{t: t, base: api, hc: &http.Client{Jar: loopbackJar{jar}, Timeout: 5 * time.Minute}}
 		var sess struct {
 			CSRFToken string `json:"csrf_token"`
 		}
@@ -191,6 +208,20 @@ func TestInstalledNode(t *testing.T) {
 			t.Fatal("bootstrap")
 		}
 		c.csrf = sess.CSRFToken
+		if _, err := os.Stat("/var/lib/opendeploy/platformd/bootstrap-token"); !os.IsNotExist(err) {
+			t.Fatalf("spent bootstrap token still on disk: %v", err)
+		}
+		// Owners must enroll MFA before using the API (packaged nodes).
+		var totp struct {
+			Secret string `json:"secret"`
+		}
+		if c.json("POST", "/api/v2/auth/totp/enroll", nil, &totp) != 200 || totp.Secret == "" {
+			t.Fatal("totp enroll")
+		}
+		code, _ := auth.TOTPCode(totp.Secret, time.Now())
+		if c.json("POST", "/api/v2/auth/totp/confirm", map[string]string{"code": code}, nil) != 200 {
+			t.Fatal("totp confirm")
+		}
 		for _, a := range []struct{ name, dir, want string }{
 			{"static", "../e2e/fixtures/static", "hello from static"},
 			{"node", "../e2e/fixtures/node", "hello from node"},

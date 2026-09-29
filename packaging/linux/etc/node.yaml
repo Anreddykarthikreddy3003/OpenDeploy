@@ -29,11 +29,12 @@ ingress:
 runtime:
   backend: containerd        # containerd | docker
   containerd_socket: /run/containerd/containerd.sock
+  # containerd_snapshotter: overlayfs   # e.g. native, btrfs, zfs
 
 build:
   executor: buildkit         # buildkit (rootless buildkitd) | docker
   # untrusted_buildkit_addr: unix:///run/opendeploy/buildkit-sandbox/buildkitd.sock
-  # ca_bundle: /etc/ssl/certs/corporate-ca.pem
+  # ca_bundle: /etc/ssl/certs/corporate-ca.pem   # TLS-inspection CA for registry pulls and build steps
 
 egress:
   enforce: true

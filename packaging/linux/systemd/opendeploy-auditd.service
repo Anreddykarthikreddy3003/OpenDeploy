@@ -6,6 +6,8 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
+# Extra trust anchors (enterprise TLS inspection): PEM files in /etc/opendeploy/ca.d.
+Environment=SSL_CERT_DIR=/etc/ssl/certs:/etc/opendeploy/ca.d
 Type=simple
 User=od-auditd
 Group=od-auditd

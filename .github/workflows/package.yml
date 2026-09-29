@@ -1,8 +1,15 @@
 name: package
-# Builds the deb/rpm packages exactly as a release does, installs the deb on a
-# real systemd host, and deploys apps through the installed node (per-service
-# users, hardened units, rootless BuildKit, containerd, Caddy). Then upgrades
-# in place and removes the package.
+# Builds every installable artifact the way a release does and proves each
+# one on a real host:
+#   deb-install  deb on a systemd runner; apps deploy through the installed
+#                node; in-place upgrade into the other slot; removal
+#   guest        the managed Linux guest (WSL2 rootfs, VM image) booted under
+#                systemd and under QEMU/KVM with the vsock bridge
+#   windows      MSI install -> Windows service + service account -> status ->
+#                uninstall
+#   macos        pkg install -> launchd daemon -> status -> uninstall
+# Hosted Windows/macOS runners cannot run nested virtualization, so the WSL2
+# and Virtualization.framework boots themselves are covered by the guest job.
 on:
   push:
     branches: [main, "claude/**"]
@@ -10,9 +17,9 @@ on:
 permissions:
   contents: read
 jobs:
-  deb-install:
+  build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -36,7 +43,30 @@ jobs:
         run: |
           dpkg-deb -I dist/opendeploy_*_linux-amd64.deb
           dpkg-deb -c dist/opendeploy_*_linux-amd64.deb | grep -q './usr/lib/opendeploy/release/packaging/linux/install.sh'
-          rpm -qip dist/opendeploy_*_linux-amd64.rpm || true
+          dpkg-deb -c dist/opendeploy_*_linux-amd64.deb | grep -q './usr/lib/opendeploy/release/bin/opendeploy-guest-agent'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          retention-days: 7
+          path: |
+            dist/*.deb
+            dist/*.rpm
+            dist/opendeployctl_*_windows-*.zip
+            dist/opendeployctl_*_darwin-*.tar.gz
+
+  deb-install:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: dist
       - name: host prerequisites (Caddy, rootless BuildKit, nftables)
         run: |
           sudo apt-get update -q
@@ -70,4 +100,162 @@ jobs:
           test -d /var/lib/opendeploy/platformd
       - name: service journals
         if: failure()
-        run: sudo journalctl --no-pager -n 400 -u 'opendeploy-*'
+        run: sudo journalctl --no-pager -n 400 -u 'opendeploy-*' || true
+
+  guest:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: dist
+      - uses: docker/setup-qemu-action@v3
+        if: matrix.arch == 'arm64'
+      - name: build the WSL2 distribution
+        run: guest/build.sh --deb dist/opendeploy_*_linux-${{ matrix.arch }}.deb --arch ${{ matrix.arch }} --kind wsl2 --out out/wsl2-${{ matrix.arch }}
+      - name: boot-test the WSL2 rootfs under systemd
+        if: matrix.arch == 'amd64'
+        run: guest/test-wsl-rootfs.sh out/wsl2-amd64/opendeploy.wsl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: guest-wsl2-${{ matrix.arch }}
+          retention-days: 7
+          path: out/wsl2-${{ matrix.arch }}
+      - name: build the VM image
+        run: |
+          docker image prune -af >/dev/null
+          guest/build.sh --deb dist/opendeploy_*_linux-${{ matrix.arch }}.deb --arch ${{ matrix.arch }} --kind vz --out out/vz-${{ matrix.arch }}
+      - name: boot-test the VM image under QEMU/KVM (vsock bridge)
+        if: matrix.arch == 'amd64'
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q qemu-system-x86
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          guest/test-vz-qemu.sh out/vz-amd64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: guest-vz-${{ matrix.arch }}
+          retention-days: 7
+          path: out/vz-${{ matrix.arch }}
+
+  windows:
+    needs: guest
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: guest-wsl2-amd64
+          path: dist/guest/wsl2-amd64
+      - name: unit tests
+        run: go test -count=1 ./internal/desktop/... ./cmd/opendeploy-desktop/...
+      - name: build binaries
+        run: |
+          go build -trimpath -ldflags "-s -w -X main.version=0.0.1" -o out/bin/opendeploy-desktop.exe ./cmd/opendeploy-desktop
+          $zip = Get-ChildItem dist/opendeployctl_*_windows-amd64.zip | Select-Object -First 1
+          Expand-Archive $zip.FullName -DestinationPath out/ctl
+          Copy-Item out/ctl/bin/opendeployctl.exe out/bin/
+          ./out/bin/opendeploy-desktop.exe version
+      - name: build the MSI
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          wix build -arch x64 -d Version=0.0.1 -d BinDir=out\bin -d GuestDir=dist\guest\wsl2-amd64 packaging\windows\opendeploy.wxs -o out\OpenDeploy-x64.msi
+      - name: install -> service, account and status
+        run: |
+          $p = Start-Process msiexec.exe -ArgumentList '/i', 'out\OpenDeploy-x64.msi', '/qn', '/l*v', 'msi-install.log' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "msiexec install exit $($p.ExitCode)" }
+          $svc = Get-Service OpenDeploy
+          $svc | Format-List Name, Status, StartType
+          (Get-CimInstance Win32_Service -Filter "Name='OpenDeploy'").StartName
+          Get-LocalUser opendeploy-svc | Format-List Name, Enabled
+          $status = "$env:ProgramData\OpenDeploy\status.json"
+          for ($i = 0; $i -lt 60 -and -not (Test-Path $status); $i++) { Start-Sleep 2 }
+          if (-not (Test-Path $status)) { throw "no status.json" }
+          Get-Content $status
+          & 'C:\Program Files\OpenDeploy\bin\opendeploy-desktop.exe' status
+          if ((Get-Service OpenDeploy).Status -ne 'Running') { throw "service not running" }
+      - name: uninstall
+        run: |
+          $p = Start-Process msiexec.exe -ArgumentList '/x', 'out\OpenDeploy-x64.msi', '/qn', '/l*v', 'msi-uninstall.log' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "msiexec uninstall exit $($p.ExitCode)" }
+          if (Get-Service OpenDeploy -ErrorAction SilentlyContinue) { throw "service still registered" }
+          if (Test-Path 'C:\Program Files\OpenDeploy\bin\opendeploy-desktop.exe') { throw "files left behind" }
+      - name: logs
+        if: failure()
+        run: |
+          Get-Content msi-install.log -Tail 200 -ErrorAction SilentlyContinue
+          Get-Content msi-uninstall.log -Tail 100 -ErrorAction SilentlyContinue
+          Get-Content "$env:ProgramData\OpenDeploy\desktop.log" -ErrorAction SilentlyContinue
+      - uses: actions/upload-artifact@v4
+        with:
+          name: msi-x64
+          retention-days: 7
+          path: out/OpenDeploy-x64.msi
+
+  macos:
+    needs: guest
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: guest-vz-arm64
+          path: dist/guest/vz-arm64
+      - name: unit tests
+        run: go test -count=1 ./internal/desktop/... ./cmd/opendeploy-desktop/...
+      - name: build binaries (cgo, Virtualization.framework)
+        run: |
+          CGO_ENABLED=1 go build -trimpath -ldflags "-s -w -X main.version=0.0.1" -o out/bin/opendeploy-desktop ./cmd/opendeploy-desktop
+          mkdir -p out/ctl && tar -xzf dist/opendeployctl_*_darwin-arm64.tar.gz -C out/ctl
+          cp out/ctl/bin/opendeployctl out/bin/
+          out/bin/opendeploy-desktop version
+      - name: build the pkg
+        run: packaging/macos/build-pkg.sh --version 0.0.1 --bin out/bin --guest dist/guest/vz-arm64 --out out/OpenDeploy-arm64.pkg
+      - name: install -> launchd daemon and status
+        run: |
+          sudo installer -pkg out/OpenDeploy-arm64.pkg -target /
+          sudo launchctl print system/io.github.anreddykarthikreddy3003.opendeploy.desktop | head -20
+          for i in $(seq 1 60); do sudo test -f "/Library/Application Support/OpenDeploy/status.json" && break; sleep 2; done
+          sudo cat "/Library/Application Support/OpenDeploy/status.json"
+          sudo opendeploy-desktop status
+      - name: uninstall
+        run: |
+          sudo /Library/OpenDeploy/uninstall.sh --purge
+          ! sudo launchctl print system/io.github.anreddykarthikreddy3003.opendeploy.desktop >/dev/null 2>&1
+          test ! -e /Library/OpenDeploy
+      - name: logs
+        if: failure()
+        run: |
+          sudo cat "/Library/Application Support/OpenDeploy/desktop.log" || true
+          sudo cat /Library/Logs/OpenDeploy/desktop.err.log || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pkg-arm64
+          retention-days: 7
+          path: out/OpenDeploy-arm64.pkg

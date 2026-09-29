@@ -181,7 +181,7 @@ func Builderd(n *config.Node, ids *ipc.IdentityMap, log *slog.Logger, sink audit
 		proxy = "http://" + n.Egress.ProxyListen
 	}
 	svc := builder.New(builder.Config{WorkDir: n.Build.WorkDir, HandoffDir: n.HandoffDir(), SourcesDir: filepath.Join(n.DataDir, "sources"),
-		MaxConcurrent: n.Build.MaxConcurrent, Trusted: trusted, Untrusted: untrusted, Artifacts: art, Audit: sink, Log: log, EgressProxy: proxy})
+		MaxConcurrent: n.Build.MaxConcurrent, Trusted: trusted, Untrusted: untrusted, Artifacts: art, Audit: sink, Log: log, EgressProxy: proxy, BuildCABundle: buildCABundle(n)})
 	srv := ipc.NewServer(identity.Builder, ids, log)
 	builder.Register(srv, svc)
 	return srv, svc, nil
@@ -276,4 +276,13 @@ func engineMirrors() []string {
 		return nil
 	}
 	return cfg.Mirrors
+}
+
+// buildCABundle is the extra CA bundle build steps trust (node config, or
+// OPENDEPLOY_BUILD_CA_BUNDLE for development hosts).
+func buildCABundle(n *config.Node) string {
+	if n.Build.CABundle != "" {
+		return n.Build.CABundle
+	}
+	return os.Getenv("OPENDEPLOY_BUILD_CA_BUNDLE")
 }

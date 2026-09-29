@@ -135,6 +135,9 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) error {
 	if err := s.S.CreateUser(r.Context(), u, true); err != nil {
 		return errf(409, "conflict", "the platform is already initialised")
 	}
+	if s.Bootstrapped != nil {
+		s.Bootstrapped()
+	}
 	u, _ = s.S.GetUser(r.Context(), u.ID)
 	sess, err := s.newSession(w, r, u, false)
 	if err != nil {

@@ -6,6 +6,8 @@ After=network-online.target containerd.service opendeploy-artifactd.service
 Wants=network-online.target
 
 [Service]
+# Extra trust anchors (enterprise TLS inspection): PEM files in /etc/opendeploy/ca.d.
+Environment=SSL_CERT_DIR=/etc/ssl/certs:/etc/opendeploy/ca.d
 Type=simple
 User=od-runtimed
 Group=od-runtimed
@@ -13,7 +15,7 @@ SupplementaryGroups=od-ipc od-backup
 ExecStart=/opt/opendeploy/current/bin/runtimed --config /etc/opendeploy/node.yaml
 Restart=always
 RestartSec=2
-ReadWritePaths=/var/lib/opendeploy/runtimed /var/lib/opendeploy/volumes /var/lib/opendeploy/backup-staging /run/opendeploy /run/netns /run/containerd
+ReadWritePaths=/var/lib/opendeploy/runtimed /var/lib/opendeploy/volumes /var/lib/opendeploy/backup-staging /run/opendeploy /run/netns -/run/containerd
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
 AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
 NoNewPrivileges=yes
@@ -32,6 +34,8 @@ LockPersonality=yes
 MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
+# Workload network namespaces: unshare/setns and the bind mount under /run/netns.
+SystemCallFilter=@mount setns unshare
 UMask=0077
 
 [Install]

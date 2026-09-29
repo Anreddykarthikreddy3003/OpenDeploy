@@ -13,7 +13,7 @@ import (
 
 // Info probes host capabilities.
 func (h *Host) Info() *hostops.Info {
-	in := &hostops.Info{OS: runtime.GOOS, Arch: runtime.GOARCH, CPUs: runtime.NumCPU(), Version: h.Version, DataPlane: "native",
+	in := &hostops.Info{OS: runtime.GOOS, Arch: runtime.GOARCH, CPUs: runtime.NumCPU(), Version: h.Version, DataPlane: dataPlane(),
 		Devices: map[string]bool{}, Warnings: []string{}}
 	in.Hostname, _ = os.Hostname()
 	in.Kernel = kernelRelease()
@@ -48,6 +48,20 @@ func (h *Host) Info() *hostops.Info {
 		in.Warnings = append(in.Warnings, "less than 5 GiB free in the data directory")
 	}
 	return in
+}
+
+// guestKindFile is written into the managed desktop guest images.
+var guestKindFile = "/usr/lib/opendeploy-guest-kind"
+
+// dataPlane reports native (Linux server), wsl2 (Windows) or vz (macOS).
+func dataPlane() string {
+	if b, err := os.ReadFile(guestKindFile); err == nil {
+		switch k := strings.TrimSpace(string(b)); k {
+		case "wsl2", "vz":
+			return k
+		}
+	}
+	return "native"
 }
 
 func memTotal() uint64 {

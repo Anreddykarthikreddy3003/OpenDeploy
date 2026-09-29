@@ -47,11 +47,14 @@ type Server struct {
 	RequireMFA bool
 	// BootstrapToken must be presented to create the first owner.
 	BootstrapToken string
-	allowed        []netip.Prefix
-	limiter        *limiter
-	authLimiter    *limiter
-	mux            *http.ServeMux
-	webauthnState  sync.Map
+	// Bootstrapped runs once the owner exists (platformd deletes the
+	// token file so the spent token is not shown to anyone again).
+	Bootstrapped  func()
+	allowed       []netip.Prefix
+	limiter       *limiter
+	authLimiter   *limiter
+	mux           *http.ServeMux
+	webauthnState sync.Map
 }
 
 // New builds the server.

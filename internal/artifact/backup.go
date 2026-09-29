@@ -38,6 +38,9 @@ func RegisterBackup(srv *ipc.Server, st *Store, staging string) {
 		if cerr := f.Close(); err == nil {
 			err = cerr
 		}
+		if err == nil {
+			err = backup.Shared(tmp) // platformd reads it via od-backup
+		}
 		if err != nil {
 			os.Remove(tmp)
 			return nil, err

@@ -1,0 +1,2 @@
+# The root disk grows to the size the host gave it (first boot and resizes).
+LABEL=odroot  /  ext4  defaults,discard,x-systemd.growfs  0 1

@@ -176,7 +176,7 @@ func Start(ctx context.Context, o Options) (*Stack, error) {
 			ex = &builder.DockerBuildx{}
 		}
 		svc := builder.New(builder.Config{WorkDir: n.Build.WorkDir, HandoffDir: n.HandoffDir(), SourcesDir: filepath.Join(n.DataDir, "sources"),
-			MaxConcurrent: n.Build.MaxConcurrent, Trusted: ex, Artifacts: artForBuilder, Audit: sink(identity.Builder), Log: o.Log, Fetch: o.Fetch})
+			MaxConcurrent: n.Build.MaxConcurrent, Trusted: ex, Artifacts: artForBuilder, Audit: sink(identity.Builder), Log: o.Log, Fetch: o.Fetch, BuildCABundle: n.Build.CABundle})
 		bsrv = ipc.NewServer(identity.Builder, ids, o.Log)
 		builder.Register(bsrv, svc)
 	}

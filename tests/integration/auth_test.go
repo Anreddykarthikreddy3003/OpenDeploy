@@ -48,6 +48,9 @@ func TestAuthMFAAndSessions(t *testing.T) {
 		"password": "correct horse battery"}, &sess); code != 201 || !sess.MFAEnrollment {
 		t.Fatalf("bootstrap %d %+v", code, sess)
 	}
+	if _, err := os.Stat(services.BootstrapTokenPath(s.Node)); !os.IsNotExist(err) {
+		t.Fatalf("spent bootstrap token file still present: %v", err)
+	}
 	c.csrf = sess.CSRFToken
 	ownerID := sess.User.ID
 	var e apiErr

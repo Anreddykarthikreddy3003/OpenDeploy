@@ -113,11 +113,14 @@ type RuntimeConfig struct {
 	Backend          string `yaml:"backend"` // containerd | docker
 	ContainerdSocket string `yaml:"containerd_socket"`
 	ContainerdNS     string `yaml:"containerd_namespace"`
-	DockerHost       string `yaml:"docker_host"`
-	RuncHandler      string `yaml:"runc_handler"`
-	RunscHandler     string `yaml:"runsc_handler"`
-	VMHandler        string `yaml:"vm_handler"`
-	VolumesDir       string `yaml:"volumes_dir"`
+	// ContainerdSnapshotter overrides containerd's default snapshotter
+	// (overlayfs), e.g. "native" or "btrfs"/"zfs" on matching filesystems.
+	ContainerdSnapshotter string `yaml:"containerd_snapshotter"`
+	DockerHost            string `yaml:"docker_host"`
+	RuncHandler           string `yaml:"runc_handler"`
+	RunscHandler          string `yaml:"runsc_handler"`
+	VMHandler             string `yaml:"vm_handler"`
+	VolumesDir            string `yaml:"volumes_dir"`
 }
 
 type BuildConfig struct {
@@ -139,8 +142,12 @@ type BuildConfig struct {
 	NixpacksPath        string `yaml:"nixpacks_path"`
 	Registry            string `yaml:"registry"`
 	DefaultBuilderImage string `yaml:"default_builder_image"`
-	// CABundle is an extra PEM bundle (enterprise TLS inspection proxies)
-	// trusted by OpenDeploy-managed builders for registry access.
+	// CABundle is an extra PEM bundle (enterprise TLS inspection proxies).
+	// OpenDeploy-managed builders trust it for registry access, and build
+	// steps receive it (merged with the system roots) as the build secret
+	// "opendeploy-ca": generated Dockerfiles use it in every RUN step;
+	// custom Dockerfiles opt in with
+	// RUN --mount=type=secret,id=opendeploy-ca,target=/run/secrets/opendeploy-ca.
 	CABundle string `yaml:"ca_bundle"`
 }
 

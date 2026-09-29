@@ -1,0 +1,11 @@
+#!/bin/sh
+# Mount the host-shipped kernel modules (read-only) before switch_root so
+# udev and modprobe find them from the first moment of the real boot.
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "$1" in prereqs) prereqs; exit 0 ;; esac
+dev=/dev/disk/by-label/odmods
+[ -e "$dev" ] || dev=/dev/vdb
+if [ -e "$dev" ]; then
+	mount -t ext4 -o ro "$dev" "${rootmnt}/usr/lib/modules" || echo "opendeploy: cannot mount kernel modules from $dev" >&2
+fi

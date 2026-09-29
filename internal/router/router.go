@@ -219,7 +219,7 @@ func Render(t Table, o Options) ([]byte, error) {
 	}
 	cfg := map[string]any{
 		"admin": map[string]any{
-			"listen":         "unix/" + o.AdminSocket,
+			"listen":         adminListen(o.AdminSocket),
 			"enforce_origin": false,
 			"config":         map[string]any{"persist": false},
 		},
@@ -545,9 +545,13 @@ func (m *Manager) Restore(ctx context.Context) error {
 // BootstrapConfig is the minimal config Caddy starts with (admin socket
 // only, no public routes) before routemgr restores last-known-good.
 func BootstrapConfig(adminSocket string) []byte {
-	b, _ := json.Marshal(map[string]any{"admin": map[string]any{"listen": "unix/" + adminSocket, "config": map[string]any{"persist": false}}})
+	b, _ := json.Marshal(map[string]any{"admin": map[string]any{"listen": adminListen(adminSocket), "config": map[string]any{"persist": false}}})
 	return b
 }
 
 // PortString formats a port for listeners.
 func PortString(p int) string { return strconv.Itoa(p) }
+
+// adminListen is Caddy's admin address: a unix socket whose mode lets the
+// od-caddy group (routemgr) connect. Caddy 2.8+ otherwise creates it 0200.
+func adminListen(sock string) string { return "unix/" + sock + "|0660" }

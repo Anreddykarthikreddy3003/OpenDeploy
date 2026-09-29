@@ -2,6 +2,7 @@ package builder
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"errors"
@@ -120,6 +121,9 @@ type Config struct {
 	BuildpacksOn  bool
 	NixpacksOn    bool
 	EgressProxy   string // HTTP(S) proxy URL injected as build args
+	// BuildCABundle is an extra PEM bundle (enterprise TLS inspection) that
+	// build steps must trust; see detect.WithBuildCA.
+	BuildCABundle string
 	MaxLogLines   int
 	Fetch         func(ctx context.Context, dir string, s git.Source) (*git.Result, error)
 }
@@ -412,6 +416,17 @@ func (s *Service) build(ctx context.Context, j *job, r Req, exec Executor, timeo
 			}
 			spec.BuildArgs["NO_PROXY"] = "localhost,127.0.0.1"
 		}
+		var caBundle string
+		if s.cfg.BuildCABundle != "" {
+			if caBundle, err = writeBuildCA(ws, s.cfg.BuildCABundle); err != nil {
+				return nil, err
+			}
+			if plan.Generated {
+				plan.DockerfileContent = detect.WithBuildCA(plan.DockerfileContent)
+				res.Dockerfile = plan.DockerfileContent
+			}
+			fmt.Fprintf(lw, "==> trusting the node's build CA bundle (secret %q)\n", detect.BuildCASecretID)
+		}
 		if plan.Generated {
 			gen := filepath.Join(ws, "gen")
 			if err := os.MkdirAll(gen, 0o700); err != nil {
@@ -454,6 +469,15 @@ func (s *Service) build(ctx context.Context, j *job, r Req, exec Executor, timeo
 				spec.Secrets[name] = p
 			}
 		}
+		if caBundle != "" {
+			if spec.Secrets == nil {
+				spec.Secrets = map[string]string{}
+			}
+			if _, clash := spec.Secrets[detect.BuildCASecretID]; clash {
+				return nil, fmt.Errorf("build secret name %q is reserved", detect.BuildCASecretID)
+			}
+			spec.Secrets[detect.BuildCASecretID] = caBundle
+		}
 		fmt.Fprintf(lw, "==> building with %s (runtime %s)\n", exec.Name(), firstNonEmpty(r.BuildRuntime, "runc"))
 		if err := exec.Build(bctx, spec, lw); err != nil {
 			if errors.Is(bctx.Err(), context.DeadlineExceeded) {
@@ -468,7 +492,10 @@ func (s *Service) build(ctx context.Context, j *job, r Req, exec Executor, timeo
 		fmt.Fprintf(lw, "WARNING: exact values of secrets %v appeared in build output and were masked; rotate them\n", res.LeakedSecrets)
 	}
 
-	// 4. Hand off to artifactd.
+	// 4. Hand off to artifactd (via the shared od-handoff group).
+	if err := shareTree(hand); err != nil {
+		return nil, err
+	}
 	j.setPhase("ingesting")
 	fmt.Fprintln(lw, "==> validating and importing artifact")
 	ing, err := s.cfg.Artifacts.Ingest(ctx, artifact.IngestReq{ProjectID: r.ProjectID, DeploymentID: r.DeploymentID, Kind: kind})
@@ -860,4 +887,62 @@ func (c *Client) Forget(ctx context.Context, id string) error {
 }
 func (c *Client) Plan(ctx context.Context, r PlanReq) (*PlanResp, error) {
 	return ipc.Call[PlanReq, *PlanResp](ctx, c.C, OpPlan, r)
+}
+
+// systemRootFiles are the usual locations of the host trust store (as in
+// crypto/x509); the first one present is used.
+var systemRootFiles = []string{
+	"/etc/ssl/certs/ca-certificates.crt",
+	"/etc/pki/tls/certs/ca-bundle.crt",
+	"/etc/ssl/ca-bundle.pem",
+	"/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+	"/etc/ssl/cert.pem",
+}
+
+// writeBuildCA writes a complete trust bundle (host roots + the configured
+// extra CAs) into the build workspace: the toolchain variables that use it
+// replace their default roots, so it must contain both.
+func writeBuildCA(ws, extra string) (string, error) {
+	add, err := os.ReadFile(extra)
+	if err != nil {
+		return "", fmt.Errorf("build CA bundle: %w", err)
+	}
+	if !bytes.Contains(add, []byte("-----BEGIN CERTIFICATE-----")) {
+		return "", fmt.Errorf("build CA bundle %s contains no PEM certificates", extra)
+	}
+	var b bytes.Buffer
+	for _, f := range systemRootFiles {
+		if sys, err := os.ReadFile(f); err == nil {
+			b.Write(sys)
+			break
+		}
+	}
+	if b.Len() > 0 && !bytes.HasSuffix(b.Bytes(), []byte("\n")) {
+		b.WriteByte('\n')
+	}
+	b.Write(add)
+	dir := filepath.Join(ws, "ca")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	p := filepath.Join(dir, "bundle.pem")
+	return p, os.WriteFile(p, b.Bytes(), 0o600)
+}
+
+// shareTree makes a hand-off directory readable by its group: builderd runs
+// with umask 0077 and external build tools create files with their own modes.
+// Symlinks are never followed.
+func shareTree(dir string) error {
+	return filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		switch {
+		case d.IsDir():
+			return os.Chmod(p, 0o750)
+		case d.Type().IsRegular():
+			return os.Chmod(p, 0o640)
+		}
+		return nil
+	})
 }

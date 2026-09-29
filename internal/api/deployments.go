@@ -160,6 +160,11 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) error {
 		if _, err := tx.ExecContext(r.Context(), `UPDATE deployments SET commit_sha=? WHERE id=?`, sha, d.ID); err != nil {
 			return err
 		}
+		// builderd reads it through the shared od-sources group; set the
+		// mode explicitly (CreateTemp uses 0600 and services run with umask 0077).
+		if err := os.Chmod(tmp.Name(), 0o640); err != nil {
+			return err
+		}
 		if err := os.Rename(tmp.Name(), filepath.Join(s.sourcesDir(), d.ID+".tar.gz")); err != nil {
 			return err
 		}

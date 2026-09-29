@@ -274,7 +274,9 @@ func sortedKeys(m map[string]string) []string {
 // minimalEnv avoids leaking builderd's environment into tools.
 func minimalEnv(extra []string) []string {
 	env := []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.TempDir(), "LANG=C.UTF-8"}
-	for _, k := range []string{"BUILDKIT_HOST", "DOCKER_CONFIG", "XDG_RUNTIME_DIR", "SSL_CERT_FILE"} {
+	// The build client fetches registry tokens itself, so it needs the
+	// node's trust configuration too.
+	for _, k := range []string{"BUILDKIT_HOST", "DOCKER_CONFIG", "XDG_RUNTIME_DIR", "SSL_CERT_FILE", "SSL_CERT_DIR", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy"} {
 		if v := os.Getenv(k); v != "" {
 			env = append(env, k+"="+v)
 		}

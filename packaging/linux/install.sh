@@ -4,7 +4,8 @@
 # Run as root from an extracted release archive (opendeploy_<ver>_linux-<arch>.tar.gz)
 # or from the package payload (/usr/lib/opendeploy/release):
 #
-#   sudo ./packaging/linux/install.sh [--domain apps.example.com] [--email admin@example.com] [--no-start] [--force]
+#   sudo ./packaging/linux/install.sh [--domain apps.example.com] [--email admin@example.com] [--mode lan|direct|relay]
+#       [--ca-bundle corporate-ca.pem] [--no-start] [--force]
 #
 # It creates per-service users, state directories, the A/B release slots and
 # systemd units, writes /etc/opendeploy/node.yaml on first install, and starts
@@ -19,6 +20,8 @@ ETC=/etc/opendeploy
 UNIT_DIR=/etc/systemd/system
 DOMAIN=""
 EMAIL=""
+MODE=""
+CA_BUNDLE=""
 START=1
 FORCE=0
 
@@ -26,9 +29,11 @@ while [ $# -gt 0 ]; do
 	case "$1" in
 	--domain) DOMAIN="$2"; shift 2 ;;
 	--email) EMAIL="$2"; shift 2 ;;
+	--mode) MODE="$2"; shift 2 ;;
+	--ca-bundle) CA_BUNDLE="$2"; shift 2 ;;
 	--no-start) START=0; shift ;;
 	--force) FORCE=1; shift ;;
-	-h|--help) sed -n '2,13p' "$0"; exit 0 ;;
+	-h|--help) sed -n '2,14p' "$0"; exit 0 ;;
 	*) echo "unknown option $1" >&2; exit 2 ;;
 	esac
 done
@@ -66,6 +71,8 @@ if ! grep -q '^od-buildkit:' /etc/subuid 2>/dev/null; then
 	usermod --add-subuids 1000000-1065535 --add-subgids 1000000-1065535 od-buildkit
 fi
 systemd-tmpfiles --create /usr/lib/tmpfiles.d/opendeploy.conf
+install -D -m 0644 "$PKG/sysctl.d/opendeploy.conf" /usr/lib/sysctl.d/60-opendeploy.conf
+sysctl -q -p /usr/lib/sysctl.d/60-opendeploy.conf || warn "could not apply /usr/lib/sysctl.d/60-opendeploy.conf"
 
 # Ubuntu 23.10+ confines unprivileged user namespaces with AppArmor; rootless
 # BuildKit needs them for rootlesskit only (the same profile Docker's rootless
@@ -134,6 +141,24 @@ if [ ! -f "$ETC/node.yaml" ]; then
 	install -m 0640 -g od-ipc "$PKG/etc/node.yaml" "$ETC/node.yaml"
 	[ -n "$DOMAIN" ] && sed -i "s|^  base_domain: \"\"|  base_domain: \"$DOMAIN\"|" "$ETC/node.yaml"
 	[ -n "$EMAIL" ] && sed -i "s|^  acme_email: \"\"|  acme_email: \"$EMAIL\"|" "$ETC/node.yaml"
+	case "$MODE" in
+	"") ;;
+	lan|direct|relay) sed -i "s|^  mode: direct .*|  mode: $MODE|" "$ETC/node.yaml" ;;
+	*) die "invalid --mode $MODE" ;;
+	esac
+fi
+# Extra trust anchors for TLS-inspecting networks: every OpenDeploy service
+# trusts PEM files in $ETC/ca.d (SSL_CERT_DIR), and build steps receive them
+# through build.ca_bundle.
+install -d -m 0755 "$ETC/ca.d"
+if [ -n "$CA_BUNDLE" ]; then
+	[ -f "$CA_BUNDLE" ] && grep -q "BEGIN CERTIFICATE" "$CA_BUNDLE" || die "--ca-bundle $CA_BUNDLE is not a PEM certificate bundle"
+	install -m 0644 "$CA_BUNDLE" "$ETC/ca.d/custom-ca.pem"
+	if grep -q '^  # ca_bundle:' "$ETC/node.yaml"; then
+		sed -i "s|^  # ca_bundle:.*|  ca_bundle: $ETC/ca.d/custom-ca.pem|" "$ETC/node.yaml"
+	elif ! grep -q '^  ca_bundle:' "$ETC/node.yaml"; then
+		warn "add 'ca_bundle: $ETC/ca.d/custom-ca.pem' under build: in $ETC/node.yaml"
+	fi
 fi
 [ -f "$PKG/etc/tuf-root.json" ] && [ ! -f "$ETC/tuf-root.json" ] && install -m 0644 "$PKG/etc/tuf-root.json" "$ETC/tuf-root.json"
 "$OPT/current/bin/opendeployctl" admin caddy-config --config "$ETC/node.yaml" > "$ETC/caddy.json.tmp"

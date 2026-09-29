@@ -144,11 +144,20 @@ func (b *Containerd) Start(ctx context.Context, s *Spec, auth RegistryAuth) (*Wo
 		// Existing container whose task stopped: start a fresh task.
 		return b.startTask(ctx, c, s, ip.String())
 	}
+	sn := b.cfg.ContainerdSnapshotter
 	img, err := b.c.GetImage(cctx, s.Image)
 	if err != nil {
-		img, err = b.c.Pull(cctx, s.Image, containerd.WithPullUnpack, containerd.WithResolver(b.resolver(auth)))
+		popts := []containerd.RemoteOpt{containerd.WithPullUnpack, containerd.WithResolver(b.resolver(auth))}
+		if sn != "" {
+			popts = append(popts, containerd.WithPullSnapshotter(sn))
+		}
+		img, err = b.c.Pull(cctx, s.Image, popts...)
 		if err != nil {
 			return nil, fmt.Errorf("pull %s: %w", s.Image, err)
+		}
+	} else if ok, _ := img.IsUnpacked(cctx, sn); !ok {
+		if err := img.Unpack(cctx, sn); err != nil {
+			return nil, fmt.Errorf("unpack %s: %w", s.Image, err)
 		}
 	}
 	wdir := b.workloadDir(s.ID)
@@ -247,13 +256,17 @@ func (b *Containerd) Start(ctx context.Context, s *Spec, auth RegistryAuth) (*Wo
 			return nil, fmt.Errorf("capability %q is not supported by the containerd backend", c)
 		}
 	}
-	c, err := b.c.NewContainer(cctx, s.ID,
+	var snap []containerd.NewContainerOpts
+	if sn != "" {
+		snap = append(snap, containerd.WithSnapshotter(sn))
+	}
+	c, err := b.c.NewContainer(cctx, s.ID, append(snap,
 		containerd.WithImage(img),
 		containerd.WithNewSnapshot(s.ID+"-rootfs", img),
 		containerd.WithRuntime(b.runtimeHandler(s.Runtime), nil),
 		containerd.WithContainerLabels(s.Labels()),
 		containerd.WithNewSpec(opts...),
-	)
+	)...)
 	if err != nil {
 		return nil, fmt.Errorf("create container: %w", err)
 	}
