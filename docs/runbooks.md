@@ -88,6 +88,8 @@ The dashboard shows "Degraded read-only mode". platformd found a violated invari
 |---|---|
 | Rolled back automatically | Platform → Updates shows `rolled_back`: the new release failed its readiness gate and the previous slot is active again. Nothing else to do; report the version. |
 | "Operator action needed" | The failed release had migrated the database schema, so automatic rollback is unsafe. A backup was taken **before** the migration. Restore it onto this node (R5 with `--force`) while services are stopped; the previous release is still in the other slot. |
+| Package upgrade rolled back | `apt`/`dnf` reports that the upgrade "failed its readiness gate and was rolled back": the new release did not pass `/readyz` within 2 minutes, so `install.sh` switched back to the previous slot. The node keeps running the previous release. Report the journal (`journalctl -u 'opendeploy-*'`) with the version. |
+| Package upgrade stopped after a migration | The new release moved the schema forward and did not become ready. platformd took a checksummed snapshot of its database before migrating, in `/var/lib/opendeploy/platformd/snapshots/`. Stop OpenDeploy (`systemctl stop opendeploy.target`), check the snapshot (`cd /var/lib/opendeploy/platformd/snapshots && sha256sum -c <snapshot>.sha256`), copy it over `/var/lib/opendeploy/platformd/platform.db`, point `/opt/opendeploy/slots/current` back at the other slot, and start OpenDeploy. If in doubt, restore the last backup instead (R5). |
 | Halted or revoked | Nodes refuse to stage that release; no action is needed. |
 
 ---

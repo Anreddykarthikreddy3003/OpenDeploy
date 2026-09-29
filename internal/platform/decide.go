@@ -2,9 +2,11 @@ package platform
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/anreddykarthikreddy3003/opendeploy/internal/ipc"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/policy"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/store"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/trust"
@@ -18,8 +20,11 @@ type HostCaps struct {
 	NetworkPolicy bool            `json:"network_policy"`
 	NetworkNote   string          `json:"network_note,omitempty"`
 	RootlessBuild bool            `json:"rootless_build"`
-	Profile       string          `json:"profile"`
-	Measured      time.Time       `json:"measured"`
+	// networkTransient: egressd did not answer (e.g. restarting), which is
+	// not a verdict on whether this node can enforce network policy.
+	networkTransient bool
+	Profile          string    `json:"profile"`
+	Measured         time.Time `json:"measured"`
 }
 
 // HostCapabilities measures (and caches for 30s) what this node enforces.
@@ -46,10 +51,13 @@ func (p *Platform) HostCapabilities(ctx context.Context) (*HostCaps, error) {
 		c.NetworkNote = "INSECURE: network policy not enforced (dev mode)"
 	} else if err != nil {
 		c.NetworkNote = err.Error()
+		c.networkTransient = ipc.IsCode(err, ipc.CodeUnavailable)
 	} else {
 		c.NetworkNote = st.Message
 	}
-	p.caps, p.capsAt = c, time.Now()
+	if !c.networkTransient { // re-measure as soon as egressd is back
+		p.caps, p.capsAt = c, time.Now()
+	}
 	return c, nil
 }
 
@@ -78,6 +86,11 @@ func (p *Platform) decide(ctx context.Context, proj *store.Project, env *store.E
 	}
 	d, err := trust.Decide(admin, src, req, host)
 	if err != nil {
+		if !hc.NetworkPolicy && hc.networkTransient && errors.Is(err, trust.ErrNoNetworkPolicy) {
+			// Still fail closed, but retry: the enforcer is unreachable,
+			// not absent (e.g. egressd restarting during an upgrade).
+			return nil, fmt.Errorf("%w: %w (%s)", ErrRetry, err, hc.NetworkNote)
+		}
 		if !hc.NetworkPolicy && hc.NetworkNote != "" {
 			return nil, fmt.Errorf("%w (%s)", err, hc.NetworkNote)
 		}

@@ -197,6 +197,12 @@ func TestFullStack(t *testing.T) {
 	defer s.Close()
 	base := "http://" + s.APIAddr
 	c := newClient(t, base)
+	var ready struct {
+		Ready bool `json:"ready"`
+	}
+	if code := c.do("GET", "/readyz", nil, &ready); code != 200 || !ready.Ready {
+		t.Fatalf("readyz %d %+v: every Tier-0 service should answer", code, ready)
+	}
 
 	// ---- bootstrap owner (requires the one-time token file)
 	tok, _ := os.ReadFile(services.BootstrapTokenPath(s.Node))

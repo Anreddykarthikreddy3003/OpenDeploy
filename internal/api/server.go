@@ -49,7 +49,10 @@ type Server struct {
 	BootstrapToken string
 	// Bootstrapped runs once the owner exists (platformd deletes the
 	// token file so the spent token is not shown to anyone again).
-	Bootstrapped  func()
+	Bootstrapped func()
+	// Ready reports the Tier-0 services that are not answering (name ->
+	// error); nil means only the database is checked.
+	Ready         func(ctx context.Context) map[string]string
 	allowed       []netip.Prefix
 	limiter       *limiter
 	authLimiter   *limiter

@@ -11,15 +11,16 @@ import (
 	"io/fs"
 	"log/slog"
 
+	"github.com/anreddykarthikreddy3003/opendeploy/internal/schema"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/state"
 )
 
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
 
-// SchemaVersion is the latest platform schema migration (recorded in
-// backup manifests so restore tooling can refuse incompatible downgrades).
-const SchemaVersion = 1
+// SchemaVersion is the latest platform schema migration (see
+// internal/schema).
+const SchemaVersion = schema.Version
 
 // Migrations returns the embedded platform migrations.
 func Migrations() fs.FS {

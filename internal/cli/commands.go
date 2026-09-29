@@ -24,6 +24,7 @@ import (
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/config"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/policy"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/router"
+	"github.com/anreddykarthikreddy3003/opendeploy/internal/schema"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/services"
 )
 
@@ -59,7 +60,10 @@ func init() {
 		{"restore", "[--from DIR] [--id ID|latest] --master-key FILE [--signer B64] [--list] [--force]", "restore a node from an encrypted backup (services stopped)", cmdRestore},
 		{"doctor", "", "check host capabilities for OpenDeploy", cmdDoctor},
 		{"dev", "[--port 8080] [--data DIR]", "run a single-process development node with the dashboard", cmdDev},
-		{"version", "", "print the version", func(context.Context, []string) error { fmt.Println("opendeployctl", Version); return nil }},
+		{"version", "", "print the version", func(context.Context, []string) error {
+			fmt.Printf("opendeployctl %s schema=%d\n", Version, schema.Version)
+			return nil
+		}},
 	}
 }
 

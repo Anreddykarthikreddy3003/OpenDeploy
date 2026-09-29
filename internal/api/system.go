@@ -1,11 +1,14 @@
 package api
 
 import (
+	"context"
 	"io/fs"
 	"net/http"
 	"path"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/audit"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/auth"
@@ -149,6 +152,33 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, st, body)
 }
 
+// handleReadyz is the release readiness gate (package upgrades and the
+// verified updater): the database is writable and every Tier-0 service
+// answers. It names the services that are down but reveals nothing else.
+func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	down := map[string]string{}
+	if d := s.S.DB.Degraded(); d != "" {
+		down["platformd"] = "degraded: " + d
+	}
+	if s.Ready != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		for name, err := range s.Ready(ctx) {
+			down[name] = err
+		}
+	}
+	if len(down) > 0 {
+		names := make([]string, 0, len(down))
+		for n := range down {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		writeJSON(w, 503, map[string]any{"ready": false, "waiting_for": names})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ready": true})
+}
+
 // spa serves the embedded dashboard with index.html fallback.
 func (s *Server) spa(w http.ResponseWriter, r *http.Request) {
 	if s.UI == nil {
@@ -178,6 +208,7 @@ func (s *Server) routes() {
 	pre := func(h handler) http.HandlerFunc { return s.authed(h, true) }
 
 	m.HandleFunc("GET /healthz", s.handleHealthz)
+	m.HandleFunc("GET /readyz", s.handleReadyz)
 	m.HandleFunc("POST /webhooks/github", s.handleWebhook)
 
 	// auth

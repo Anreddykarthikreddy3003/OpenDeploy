@@ -18,6 +18,10 @@ systemctl status 'opendeploy-*'           # one unit per service
 journalctl -u opendeploy-platformd -f     # control plane log (JSON)
 ```
 
+**Probes** (loopback API, no authentication):
+- `GET /healthz`: platformd is up and its database is writable. Use it for liveness.
+- `GET /readyz`: additionally, every Tier-0 service (auditd, secretd, artifactd, builderd, runtimed, routemgr, hostd) answers. Package upgrades and the verified updater wait for it before keeping a new release; a 503 lists the services not answering.
+
 **Degraded read-only mode.** When a state invariant is violated, or the database fails its integrity check, platformd refuses changes. Running apps keep serving. Follow runbook R2.
 
 ## Deployments

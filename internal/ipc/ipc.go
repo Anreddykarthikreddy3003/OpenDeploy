@@ -299,6 +299,23 @@ func (c *Client) WithDevIdentity(id string) *Client {
 	return &cp
 }
 
+// Healthy reports whether the server answers its health endpoint.
+func (c *Client) Healthy(ctx context.Context) error {
+	hr, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://ipc/healthz", nil)
+	if err != nil {
+		return err
+	}
+	res, err := c.hc.Do(hr)
+	if err != nil {
+		return err
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return fmt.Errorf("health check: %s", res.Status)
+	}
+	return nil
+}
+
 // Call invokes op on the server.
 func Call[Req, Resp any](ctx context.Context, c *Client, op string, req Req) (Resp, error) {
 	var zero Resp

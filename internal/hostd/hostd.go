@@ -54,7 +54,7 @@ func New(n *config.Node, version string, log *slog.Logger, sink audit.Sink) *Hos
 	h.Systemctl = systemctl
 	h.Healthy = func(ctx context.Context) error {
 		c := &http.Client{Timeout: 5 * time.Second}
-		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+n.API.Listen+"/healthz", nil)
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+n.API.Listen+"/readyz", nil)
 		res, err := c.Do(req)
 		if err != nil {
 			return err

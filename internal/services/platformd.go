@@ -10,12 +10,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/api"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/auth"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/config"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/hostd"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/identity"
+	"github.com/anreddykarthikreddy3003/opendeploy/internal/ipc"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/network"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/platform"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/relay"
@@ -88,6 +90,29 @@ func NewPlatformd(ctx context.Context, n *config.Node, log *slog.Logger, c *Clie
 	}
 	srv := api.New(p, sealer, o.UI, requireMFA, boot)
 	srv.Bootstrapped = func() { _ = os.Remove(BootstrapTokenPath(n)) }
+	deps := map[string]*ipc.Client{identity.Audit: c.Audit.C, identity.Secret: c.Secrets.C, identity.Artifact: c.Artifact.C,
+		identity.Builder: c.Builder.C, identity.Runtime: c.Runtime.C, identity.Router: c.Router.C}
+	if h, ok := p.Host.(*hostd.Client); ok && h != nil {
+		deps[identity.Host] = h.C
+	}
+	srv.Ready = func(ctx context.Context) map[string]string {
+		var mu sync.Mutex
+		var wg sync.WaitGroup
+		down := map[string]string{}
+		for name, cl := range deps {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := cl.Healthy(ctx); err != nil {
+					mu.Lock()
+					down[name] = err.Error()
+					mu.Unlock()
+				}
+			}()
+		}
+		wg.Wait()
+		return down
+	}
 	return &Platformd{Store: st, Platform: p, API: srv}, nil
 }
 

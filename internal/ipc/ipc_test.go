@@ -81,3 +81,14 @@ func TestUnknownOpAndFields(t *testing.T) {
 		t.Fatalf("unknown field must be rejected, got %v", err)
 	}
 }
+
+func TestHealthy(t *testing.T) {
+	// Any local caller may probe health, even one with no identity.
+	c := start(t, NewIdentityMap(map[uint32]string{}), []string{"platformd"})
+	if err := c.Healthy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewClient(filepath.Join(t.TempDir(), "gone.sock")).Healthy(context.Background()); err == nil {
+		t.Fatal("missing server reported healthy")
+	}
+}

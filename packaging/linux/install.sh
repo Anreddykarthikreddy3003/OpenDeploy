@@ -46,6 +46,10 @@ die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 [ -d /run/systemd/system ] || die "systemd is required"
 [ -x "$SRC/bin/platformd" ] || die "no release binaries next to this script ($SRC/bin)"
 VERSION=$("$SRC/bin/opendeployctl" version 2>/dev/null | awk '{print $2}')
+# schema_of prints a release's schema version ("" when it predates
+# reporting one).
+schema_of() { "$1" version 2>/dev/null | sed -n 's/.* schema=\([0-9][0-9]*\).*/\1/p'; }
+SCHEMA=$(schema_of "$SRC/bin/opendeployctl")
 
 # ---- prerequisites ---------------------------------------------------------------
 missing=""
@@ -106,6 +110,7 @@ fi
 # ---- release slots -----------------------------------------------------------------
 mkdir -p "$OPT/slots"
 STAGE=1
+ACTIVE=""
 if [ "$FORCE" -eq 0 ] && [ -L "$OPT/slots/current" ] && [ -x "$OPT/slots/current/bin/opendeployctl" ]; then
 	RUNNING=$("$OPT/slots/current/bin/opendeployctl" version 2>/dev/null | awk '{print $2}')
 	# The node may already run a newer release applied by the verified
@@ -124,6 +129,8 @@ if [ "$STAGE" -eq 0 ]; then
 elif [ -L "$OPT/slots/current" ]; then
 	ACTIVE=$(readlink "$OPT/slots/current")
 	TARGET=a; [ "$ACTIVE" = a ] && TARGET=b
+	PREV_VERSION=${RUNNING:-}
+	PREV_SCHEMA=$(schema_of "$OPT/slots/$ACTIVE/bin/opendeployctl")
 	say "upgrading: staging $VERSION into slot $TARGET (active: $ACTIVE)"
 else
 	TARGET=a
@@ -183,13 +190,37 @@ for u in "$PKG"/systemd/*.service "$PKG"/systemd/opendeploy.target; do
 done
 systemctl daemon-reload
 systemctl enable opendeploy.target >/dev/null
+# ready waits for the readiness gate: platformd's database is healthy and
+# every Tier-0 service answers.
+ready() {
+	for i in $(seq 1 "${OPENDEPLOY_READY_TIMEOUT:-120}"); do
+		if curl -fsS http://127.0.0.1:8080/readyz >/dev/null 2>&1; then return 0; fi
+		sleep 1
+	done
+	return 1
+}
 if [ "$START" -eq 1 ]; then
 	say "starting OpenDeploy"
 	systemctl restart opendeploy.target
-	for i in $(seq 1 30); do
-		if curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1; then break; fi
-		sleep 1
-	done
+	if ! ready; then
+		waiting=$(curl -sS http://127.0.0.1:8080/readyz 2>/dev/null || echo "platformd not answering")
+		if [ "$STAGE" -eq 1 ] && [ -n "$ACTIVE" ]; then
+			# Same rule as the verified updater: a release that moves the
+			# schema forward cannot be rolled back automatically (the old
+			# binaries may not read the migrated data).
+			if [ -z "$SCHEMA" ] || [ -z "$PREV_SCHEMA" ] || [ "$SCHEMA" -gt "$PREV_SCHEMA" ]; then
+				die "$VERSION did not become ready ($waiting) after a possible schema migration; automatic rollback is unsafe. Inspect: journalctl -u 'opendeploy-*'; runbook R4 in docs/runbooks.md"
+			fi
+			warn "$VERSION did not become ready ($waiting); rolling back to slot $ACTIVE${PREV_VERSION:+ ($PREV_VERSION)}"
+			ln -sfn "$ACTIVE" "$OPT/slots/.current-tmp"
+			mv -T "$OPT/slots/.current-tmp" "$OPT/slots/current"
+			"$OPT/current/bin/opendeployctl" admin caddy-config --config "$ETC/node.yaml" > "$ETC/caddy.json.tmp" && chmod 0644 "$ETC/caddy.json.tmp" && mv "$ETC/caddy.json.tmp" "$ETC/caddy.json"
+			systemctl restart opendeploy.target
+			ready || warn "the previous release is not ready either; inspect journalctl -u 'opendeploy-*'"
+			die "upgrade to $VERSION failed its readiness gate and was rolled back${PREV_VERSION:+ to $PREV_VERSION}"
+		fi
+		warn "OpenDeploy is not ready yet ($waiting); inspect journalctl -u 'opendeploy-*'"
+	fi
 fi
 
 echo
