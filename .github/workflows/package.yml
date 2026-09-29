@@ -109,6 +109,20 @@ jobs:
       - name: service journals
         if: failure()
         run: sudo journalctl --no-pager -n 400 -u 'opendeploy-*' || true
+      - name: rootless BuildKit diagnostics
+        if: failure()
+        run: |
+          set -x
+          cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns /proc/sys/kernel/unprivileged_userns_clone /proc/sys/user/max_user_namespaces || true
+          ls -l /etc/apparmor.d | grep -i -e rootless -e opendeploy || true
+          sudo aa-status 2>/dev/null | grep -i -e rootless -e opendeploy || true
+          sudo dmesg | grep -i -e 'apparmor="DENIED"' -e userns | tail -20 || true
+          grep od-buildkit /etc/subuid /etc/subgid || true
+          ls -l /usr/bin/newuidmap /usr/bin/newgidmap || true
+          sudo -u od-buildkit unshare --user --map-root-user true; echo "unshare: $?"
+          sudo -u od-buildkit /usr/bin/rootlesskit --net=host true; echo "rootlesskit direct: $?"
+          sudo systemd-run --wait --pipe -p User=od-buildkit -p ProtectHome=yes -p Delegate=yes /usr/bin/rootlesskit --net=host true; echo "rootlesskit systemd-run: $?"
+          sudo cat /proc/$(pgrep -n -f 'rootlesskit' || echo self)/attr/current || true
 
   guest:
     needs: build
