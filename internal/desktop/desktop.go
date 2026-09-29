@@ -113,15 +113,16 @@ type Supervisor struct {
 }
 
 func (s *Supervisor) setStatus(state, msg string) {
+	// The file is updated under the lock so it never lags (or overtakes)
+	// the in-memory status.
 	s.mu.Lock()
 	s.status.Guest, s.status.State, s.status.Message, s.status.Updated = s.Guest.Kind(), state, msg, time.Now().UTC()
-	st := s.status
-	s.mu.Unlock()
-	b, _ := json.MarshalIndent(st, "", "  ")
+	b, _ := json.MarshalIndent(s.status, "", "  ")
 	tmp := StatusPath(s.Config.DataDir) + ".tmp"
 	if os.WriteFile(tmp, b, 0o644) == nil {
 		_ = os.Rename(tmp, StatusPath(s.Config.DataDir))
 	}
+	s.mu.Unlock()
 	s.Log.Info("data plane", "state", state, "message", msg)
 }
 

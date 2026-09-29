@@ -86,8 +86,10 @@ func TestSupervisorRestartsCrashedGuestAndStopsOnShutdown(t *testing.T) {
 			return errors.New("booting")
 		}}
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error)
-	go func() { done <- s.Run(ctx) }()
+	done := make(chan struct{})
+	go func() { _ = s.Run(ctx); close(done) }()
+	// Always stop the supervisor before TempDir cleanup, even on failure.
+	t.Cleanup(func() { cancel(); <-done })
 
 	waitFor(t, "first start", func() bool { st, _ := g.count(); return st == 1 })
 	healthy.Store(true)
