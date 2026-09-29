@@ -3,7 +3,9 @@ package backup
 import (
 	"context"
 	"crypto/hmac"
+	"crypto/md5"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/xml"
 	"errors"
@@ -196,7 +198,24 @@ func (t *S3Target) Put(ctx context.Context, key string, r io.Reader, size int64,
 		hdr.Set("X-Amz-Object-Lock-Mode", t.ObjectLock)
 		hdr.Set("X-Amz-Object-Lock-Retain-Until-Date", retainUntil.UTC().Format(time.RFC3339))
 	}
-	res, err := t.do(ctx, http.MethodPut, u, r, size, "UNSIGNED-PAYLOAD", hdr)
+	// Sign the payload hash and send checksums: the store rejects a
+	// corrupted upload, and AWS requires Content-MD5 or a checksum on any
+	// write that carries object-lock retention.
+	payloadHash := "UNSIGNED-PAYLOAD"
+	if rs, ok := r.(io.ReadSeeker); ok {
+		sh, mh := sha256.New(), md5.New() //nolint:gosec // Content-MD5 is the S3 protocol's integrity header
+		if _, err := io.Copy(io.MultiWriter(sh, mh), rs); err != nil {
+			return err
+		}
+		if _, err := rs.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+		sum := sh.Sum(nil)
+		payloadHash = hex.EncodeToString(sum)
+		hdr.Set("Content-MD5", base64.StdEncoding.EncodeToString(mh.Sum(nil)))
+		hdr.Set("X-Amz-Checksum-Sha256", base64.StdEncoding.EncodeToString(sum))
+	}
+	res, err := t.do(ctx, http.MethodPut, u, r, size, payloadHash, hdr)
 	if err != nil {
 		return err
 	}

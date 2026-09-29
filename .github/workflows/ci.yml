@@ -38,6 +38,8 @@ jobs:
         run: test -z "$(gofmt -l $(git ls-files '*.go'))" || (gofmt -l $(git ls-files '*.go'); exit 1)
       - name: vet
         run: go vet ./...
+      - name: S3 server for backup tests (MinIO, object lock, delete-denied node user)
+        run: tests/s3/minio.sh | sed 's/^export //' >> "$GITHUB_ENV"
       - name: test
         run: go test -race -count=1 ./...
       - uses: actions/download-artifact@v4

@@ -6,10 +6,12 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -21,17 +23,40 @@ import (
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/runtime"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/services"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/store"
+	"github.com/anreddykarthikreddy3003/opendeploy/internal/testcap"
 )
 
 // ST-11 / Q56-Q57: encrypted backup of a live node and restore onto a clean
 // node that comes back with its users, projects, secrets, audit chain,
 // artifacts and volumes.
 func TestBackupAndCleanNodeRestore(t *testing.T) {
-	ctx := context.Background()
 	backups := t.TempDir()
+	backupRestoreDrill(t, config.BackupConfig{LocalDir: backups})
+}
+
+// The same drill against a real S3 server with compliance-mode object lock
+// (tests/s3/minio.sh; MinIO in CI), using node credentials that cannot
+// delete.
+func TestBackupAndCleanNodeRestoreS3(t *testing.T) {
+	ep := os.Getenv("OPENDEPLOY_S3_ENDPOINT")
+	if ep == "" {
+		testcap.Blocked(t, "no S3 server (start one with: eval \"$(tests/s3/minio.sh)\")")
+	}
+	backupRestoreDrill(t, config.BackupConfig{Endpoint: ep, Bucket: os.Getenv("OPENDEPLOY_S3_BUCKET"),
+		AccessKey: os.Getenv("OPENDEPLOY_S3_ACCESS_KEY_FILE"), SecretKey: os.Getenv("OPENDEPLOY_S3_SECRET_KEY_FILE"),
+		Prefix: "drill-" + strconv.FormatInt(time.Now().UnixNano(), 36) + "/", ObjectLock: true, RetainDays: 1})
+}
+
+func backupRestoreDrill(t *testing.T, bc config.BackupConfig) {
+	ctx := context.Background()
 	mutate := func(n *config.Node) {
-		n.Backup.LocalDir = backups
+		enabled := n.Backup
+		n.Backup = bc
 		n.Backup.Enabled = true
+		n.Backup.MasterKey, n.Backup.Schedule = enabled.MasterKey, enabled.Schedule
+		if n.Backup.Prefix == "" {
+			n.Backup.Prefix = enabled.Prefix
+		}
 	}
 	ip := nonLoopbackIP(t)
 	ln, err := net.Listen("tcp", ip+":0")
@@ -125,17 +150,27 @@ func TestBackupAndCleanNodeRestore(t *testing.T) {
 		t.Fatalf("master key export %d", code)
 	}
 	// Nothing sensitive in plaintext at rest.
-	_ = filepath.Walk(backups, func(p string, fi os.FileInfo, err error) error {
-		if err == nil && !fi.IsDir() {
-			b, _ := os.ReadFile(p)
-			for _, needle := range []string{"s3cr3t-value", "persistent-row", "correct horse"} {
-				if strings.Contains(string(b), needle) {
-					t.Fatalf("plaintext %q found in backup object %s", needle, p)
-				}
+	tgt, prefix, err := backup.TargetFromConfig(a.Node.Backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	objs, err := tgt.List(ctx, prefix)
+	if err != nil || len(objs) < 2 {
+		t.Fatalf("backup objects %v %v", objs, err)
+	}
+	for _, k := range objs {
+		rc, err := tgt.Get(ctx, k)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(rc)
+		rc.Close()
+		for _, needle := range []string{"s3cr3t-value", "persistent-row", "correct horse"} {
+			if strings.Contains(string(b), needle) {
+				t.Fatalf("plaintext %q found in backup object %s", needle, k)
 			}
 		}
-		return nil
-	})
+	}
 	signer := st.Status.SignerPublicKey
 	a.Close()
 
@@ -145,20 +180,19 @@ func TestBackupAndCleanNodeRestore(t *testing.T) {
 	nb.ApplyDefaults()
 	master, _ := backup.ParseMasterKey(mk.MasterKey)
 	pub, _ := base64.StdEncoding.DecodeString(signer)
-	tgt := &backup.LocalTarget{Dir: backups}
 	var wrong backup.MasterKey
 	_, _ = rand.Read(wrong[:])
-	if _, err := restore.Run(ctx, restore.Options{Node: nb, Target: tgt, Prefix: nb.Backup.Prefix, Master: wrong, Signer: pub}); err == nil {
+	if _, err := restore.Run(ctx, restore.Options{Node: nb, Target: tgt, Prefix: prefix, Master: wrong, Signer: pub}); err == nil {
 		t.Fatal("restore with the wrong master key succeeded")
 	}
 	otherPub, _, _ := ed25519.GenerateKey(rand.Reader)
-	if _, err := restore.Run(ctx, restore.Options{Node: nb, Target: tgt, Prefix: nb.Backup.Prefix, Master: master, Signer: otherPub}); !errors.Is(err, backup.ErrUntrustedSigner) {
+	if _, err := restore.Run(ctx, restore.Options{Node: nb, Target: tgt, Prefix: prefix, Master: master, Signer: otherPub}); !errors.Is(err, backup.ErrUntrustedSigner) {
 		t.Fatalf("restore with an unexpected signer: %v", err)
 	}
-	if _, err := restore.Run(ctx, restore.Options{Node: nb, Target: tgt, Prefix: nb.Backup.Prefix, ID: "latest", Master: master, Signer: pub}); err != nil {
+	if _, err := restore.Run(ctx, restore.Options{Node: nb, Target: tgt, Prefix: prefix, ID: "latest", Master: master, Signer: pub}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := restore.Run(ctx, restore.Options{Node: nb, Target: tgt, Prefix: nb.Backup.Prefix, Master: master, Signer: pub}); !errors.Is(err, restore.ErrNotClean) {
+	if _, err := restore.Run(ctx, restore.Options{Node: nb, Target: tgt, Prefix: prefix, Master: master, Signer: pub}); !errors.Is(err, restore.ErrNotClean) {
 		t.Fatalf("second restore over live state: %v", err)
 	}
 	if b, err := os.ReadFile(filepath.Join(nb.Runtime.VolumesDir, vol.ID, "sub", "row.txt")); err != nil || string(b) != "persistent-row" {

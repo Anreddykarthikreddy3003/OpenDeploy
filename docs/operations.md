@@ -32,6 +32,9 @@ journalctl -u opendeploy-platformd -f     # control plane log (JSON)
 ## Backups
 
 1. Configure a target under `backup:` in `node.yaml`. Use S3 with Object Lock, and credentials that can write but not delete.
+   - Create the bucket with Object Lock enabled (which also enables versioning) and set `object_lock: true` and `retain_days`. Objects are written in compliance mode: nobody, including the storage administrator, can delete them before the retention date.
+   - Give the node a policy with only `s3:PutObject`, `s3:GetObject`, `s3:PutObjectRetention`, `s3:GetObjectRetention` and `s3:ListBucket`. `tests/s3/minio.sh` shows a working policy; CI runs the backup and restore drill against it.
+   - Uploads carry `Content-MD5`, `x-amz-checksum-sha256` and a signed payload hash, so the store rejects a corrupted upload.
 2. Export the **master key** from **Platform → Backups → Disaster recovery key** and store it off the node, e.g. in a password manager or sealed envelope. Without it no backup can be decrypted. With it, every backup can.
 3. Note the **signer public key** shown on the same page. Restores verify manifests against it.
 4. Backups run on schedule, or with **Back up now**. Each backup contains:
