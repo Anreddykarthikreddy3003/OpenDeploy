@@ -1,0 +1,32 @@
+name: e2e
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+  workflow_call: # release gate (release.yml)
+permissions:
+  contents: read
+jobs:
+  deploy-real-apps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      OPENDEPLOY_REQUIRE_CAPS: "1" # capability skips fail (internal/testcap)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install Caddy
+        run: |
+          curl -fsSL -o /tmp/caddy.tgz https://github.com/caddyserver/caddy/releases/download/v2.10.2/caddy_2.10.2_linux_amd64.tar.gz
+          sudo tar -xzf /tmp/caddy.tgz -C /usr/local/bin caddy
+          caddy version
+      - name: Install Pebble (Let's Encrypt's ACME test server)
+        run: |
+          go install github.com/letsencrypt/pebble/v2/cmd/pebble@v2.10.1
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Docker integration tests
+        run: sudo -E env "PATH=$PATH" OPENDEPLOY_DOCKER_TESTS=1 go test -count=1 -run 'Docker' ./internal/runtime/ ./internal/build/builder/
+      - name: Deploy Node, Python, Go, Java and static apps end to end; ACME issuance against Pebble
+        run: sudo -E env "PATH=$PATH" go test -tags e2e -count=1 -timeout 40m -v ./tests/e2e/

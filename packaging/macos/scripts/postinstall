@@ -1,0 +1,7 @@
+#!/bin/sh
+# Register (or refresh) the launchd service and start the data plane.
+set -e
+mkdir -p /usr/local/bin
+ln -sf /Library/OpenDeploy/bin/opendeployctl /usr/local/bin/opendeployctl
+ln -sf /Library/OpenDeploy/bin/opendeploy-desktop /usr/local/bin/opendeploy-desktop
+/Library/OpenDeploy/bin/opendeploy-desktop install

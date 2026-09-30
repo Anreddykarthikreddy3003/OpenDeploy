@@ -1,0 +1,33 @@
+name: tuf-timestamp
+# Re-sign the TUF timestamp daily (short expiry = freeze-attack protection).
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  timestamp:
+    if: vars.TUF_REPO_BRANCH != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ vars.TUF_REPO_BRANCH }}
+          path: tuf-repo
+      - run: |
+          set -euo pipefail
+          umask 077; mkdir -p tuf-keys
+          echo "${{ secrets.TUF_TARGETS_KEY }}"   > tuf-keys/targets-1.key
+          echo "${{ secrets.TUF_SNAPSHOT_KEY }}"  > tuf-keys/snapshot-1.key
+          echo "${{ secrets.TUF_TIMESTAMP_KEY }}" > tuf-keys/timestamp-1.key
+          go run ./tools/opendeploy-release timestamp --repo tuf-repo --keys tuf-keys
+          rm -rf tuf-keys
+          cd tuf-repo
+          git config user.name "opendeploy-release"
+          git config user.email "release@users.noreply.github.com"
+          git add -A && git commit -m "Refresh timestamp" && git push

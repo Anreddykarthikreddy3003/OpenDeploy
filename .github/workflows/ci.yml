@@ -1,0 +1,52 @@
+name: ci
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+  workflow_call: # release gate (release.yml)
+permissions:
+  contents: read
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: install
+        run: cd web && npm ci
+      - name: typecheck, test, build
+        run: cd web && npm test && npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+  go:
+    needs: web
+    runs-on: ubuntu-latest
+    env:
+      OPENDEPLOY_REQUIRE_CAPS: "1" # capability skips fail (internal/testcap)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: test -z "$(gofmt -l $(git ls-files '*.go'))" || (gofmt -l $(git ls-files '*.go'); exit 1)
+      - name: vet
+        run: go vet ./...
+      - name: S3 server for backup tests (MinIO, object lock, delete-denied node user)
+        run: tests/s3/minio.sh | sed 's/^export //' >> "$GITHUB_ENV"
+      - name: test
+        run: go test -race -count=1 ./...
+      - name: soak smoke (bounded goroutines, fds, heap; converged queue; drained generations)
+        run: go test -tags soak -count=1 -timeout 20m -run TestSoak -v ./tests/integration/
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+      - name: build (dashboard embedded)
+        run: make build

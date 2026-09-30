@@ -1,0 +1,57 @@
+package api
+
+import (
+	"context"
+	"strconv"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+func TestReadinessProbeSharedAndNeverUnprobed(t *testing.T) {
+	release := make(chan struct{})
+	var calls atomic.Int32
+	s := &Server{Ready: func(ctx context.Context) map[string]string {
+		calls.Add(1)
+		<-release
+		if ctx.Err() != nil {
+			return map[string]string{"x": "cancelled"}
+		}
+		return map[string]string{}
+	}}
+	first := make(chan map[string]string)
+	go func() { first <- s.readiness() }()
+	for calls.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	// While the first probe runs, others neither probe again nor report
+	// ready without a result.
+	if got := s.readiness(); len(got) == 0 {
+		t.Fatal("reported ready before any probe finished")
+	}
+	close(release)
+	if got := <-first; len(got) != 0 {
+		t.Fatalf("first probe: %v", got)
+	}
+	if got := s.readiness(); len(got) != 0 || calls.Load() != 1 {
+		t.Fatalf("cached result %v after %d probes", got, calls.Load())
+	}
+}
+
+// Flooding the limiter with fresh keys must not reset a throttled key
+// (it used to discard every bucket past 10,000 keys).
+func TestLimiterFloodKeepsThrottledKeys(t *testing.T) {
+	l := newLimiter(0.2, 3)
+	for i := 0; i < 3; i++ {
+		l.allow("mfa:victim")
+	}
+	if l.allow("mfa:victim") {
+		t.Fatal("precondition: key should be throttled")
+	}
+	for i := 0; i < limiterMaxKeys+50; i++ {
+		l.allow("login:flood-" + strconv.Itoa(i))
+	}
+	if l.allow("mfa:victim") {
+		t.Fatal("throttled key was reset by a flood of new keys")
+	}
+}

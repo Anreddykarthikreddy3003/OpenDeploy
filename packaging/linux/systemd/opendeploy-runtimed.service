@@ -1,0 +1,39 @@
+[Unit]
+Description=OpenDeploy runtime broker (runtimed)
+Documentation=https://github.com/anreddykarthikreddy3003/opendeploy
+PartOf=opendeploy.target
+After=network-online.target containerd.service opendeploy-artifactd.service
+Wants=network-online.target
+
+[Service]
+# Extra trust anchors (enterprise TLS inspection): PEM files in /etc/opendeploy/ca.d.
+Environment=SSL_CERT_DIR=/etc/ssl/certs:/etc/opendeploy/ca.d
+Type=simple
+User=od-runtimed
+Group=od-runtimed
+SupplementaryGroups=od-ipc od-backup
+ExecStart=/opt/opendeploy/current/bin/runtimed --config /etc/opendeploy/node.yaml
+Restart=always
+RestartSec=2
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
+AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
+NoNewPrivileges=yes
+# No mount-namespacing options (ProtectSystem, PrivateTmp, ReadWritePaths, ...):
+# runtimed bind-mounts workload network namespaces under /run/netns, and those
+# mounts must be visible to containerd/runc in the host mount namespace or
+# runc fails to setns. runtimed drives containerd and holds CAP_SYS_ADMIN, so
+# it is root-equivalent regardless; its boundary is the narrow,
+# peer-authenticated IPC API, the capability set and the syscall filter.
+ProtectClock=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+# Workload network namespaces: unshare/setns and the bind mount under /run/netns.
+SystemCallFilter=@mount setns unshare
+UMask=0077
+
+[Install]
+WantedBy=opendeploy.target

@@ -1,0 +1,43 @@
+[Unit]
+Description=OpenDeploy audit chain (auditd)
+Documentation=https://github.com/anreddykarthikreddy3003/opendeploy
+PartOf=opendeploy.target
+After=network-online.target 
+Wants=network-online.target
+
+[Service]
+# Extra trust anchors (enterprise TLS inspection): PEM files in /etc/opendeploy/ca.d.
+Environment=SSL_CERT_DIR=/etc/ssl/certs:/etc/opendeploy/ca.d
+Type=simple
+User=od-auditd
+Group=od-auditd
+SupplementaryGroups=od-ipc od-backup
+ExecStart=/opt/opendeploy/current/bin/auditd --config /etc/opendeploy/node.yaml
+Restart=always
+RestartSec=2
+ReadWritePaths=/var/lib/opendeploy/auditd /var/lib/opendeploy/backup-staging /run/opendeploy
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+UMask=0077
+
+[Install]
+WantedBy=opendeploy.target

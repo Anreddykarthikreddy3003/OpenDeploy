@@ -1,0 +1,105 @@
+name: security-gate
+# Release gate (PRD §30.1): adversarial negative tests must pass on every
+# release. A control the runner cannot enforce fails (OPENDEPLOY_REQUIRE_CAPS).
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+  workflow_call: # release gate (release.yml)
+permissions:
+  contents: read
+jobs:
+  adversarial:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      OPENDEPLOY_REQUIRE_CAPS: "1" # capability skips fail (internal/testcap)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Modules (as the runner user, before any sudo step)
+        run: go mod download
+      - name: Tooling
+        run: sudo apt-get update && sudo apt-get install -y nftables
+      - name: gVisor (untrusted runtime + sandboxed builds)
+        run: |
+          set -euo pipefail
+          curl -fsSL https://gvisor.dev/archive.key | sudo gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" | sudo tee /etc/apt/sources.list.d/gvisor.list
+          sudo apt-get update && sudo apt-get install -y runsc
+          sudo runsc install
+          sudo systemctl restart docker
+          docker info --format '{{json .Runtimes}}' | grep -q runsc
+      - name: containerd backend integration
+        run: sudo -E env "PATH=$PATH" OPENDEPLOY_CONTAINERD_TESTS=1 OPENDEPLOY_CONTAINERD_SOCKET=/run/containerd/containerd.sock go test -count=1 -run Containerd -v ./internal/runtime/
+      - name: Adversarial suite (ST-01..ST-12)
+        run: |
+          set -o pipefail
+          sudo -E env "PATH=$PATH" go test -tags adversarial -count=1 -v ./tests/adversarial/ | tee adversarial.log
+          if grep -q "CAPABILITY-BLOCKED" adversarial.log; then echo "::error::controls were capability-blocked on this runner"; exit 1; fi
+      - name: Relay isolation and domain lifecycle (ST-07, ST-08)
+        run: |
+          set -o pipefail
+          sudo -E env "PATH=$PATH" go test -race -count=1 -v ./internal/relay/ ./internal/domains/ | tee -a adversarial.log
+          sudo -E env "PATH=$PATH" go test -race -count=1 -v -run 'Domain|RelayMode' ./internal/platform/ | tee -a adversarial.log
+          sudo -E env "PATH=$PATH" go test -count=1 -run '^$' -fuzz FuzzPeekSNI -fuzztime 60s ./internal/relay/
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: adversarial-log
+          path: adversarial.log
+
+  # Every parser of untrusted input (webhooks, policy files, TLS/HTTP peeks,
+  # release and backup archives, build output) is fuzzed on each push; a
+  # crasher fails the gate and is kept as a regression input.
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Fuzz (45s per target)
+        run: |
+          set -euo pipefail
+          targets=$(grep -rl --include='*_test.go' '^func Fuzz' internal | while read -r f; do
+            pkg=./$(dirname "$f"); grep -o '^func Fuzz[A-Za-z0-9_]*' "$f" | sed "s|func ||;s|$| $pkg|"; done)
+          echo "$targets"
+          echo "$targets" | while read -r name pkg; do
+            echo "::group::$name ($pkg)"
+            if ! go test -run '^$' -fuzz "^${name}\$" -fuzztime 45s "$pkg" 2>&1 | tee fuzz.log; then
+              # Go's coordinator reports "context deadline exceeded" when the
+              # time budget ends while a worker is still minimizing a new
+              # corpus entry. That is not a finding: a real one always writes
+              # "Failing input written to testdata/fuzz/...".
+              if grep -q 'Failing input written to' fuzz.log || ! grep -q 'context deadline exceeded' fuzz.log; then
+                echo "::error::$name found a failing input"; exit 1
+              fi
+              echo "::warning::$name: time budget ended during minimization (no failing input)"
+            fi
+            echo "::endgroup::"
+          done
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-crashers
+          path: internal/**/testdata/fuzz/
+
+  vulnerabilities:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: govulncheck (reachable vulnerabilities fail the gate)
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Dashboard dependencies (production, high+)
+        run: cd web && npm audit --omit=dev --audit-level=high

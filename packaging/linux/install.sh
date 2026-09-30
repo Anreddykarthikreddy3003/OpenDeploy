@@ -1,0 +1,241 @@
+#!/bin/sh
+# OpenDeploy Linux installer / upgrader.
+#
+# Run as root from an extracted release archive (opendeploy_<ver>_linux-<arch>.tar.gz)
+# or from the package payload (/usr/lib/opendeploy/release):
+#
+#   sudo ./packaging/linux/install.sh [--domain apps.example.com] [--email admin@example.com] [--mode lan|direct|relay]
+#       [--ca-bundle corporate-ca.pem] [--no-start] [--force]
+#
+# It creates per-service users, state directories, the A/B release slots and
+# systemd units, writes /etc/opendeploy/node.yaml on first install, and starts
+# opendeploy.target. Re-running it upgrades: the release is staged into the
+# inactive slot and activated (the previous slot stays for rollback).
+set -eu
+
+SRC=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+PKG="$SRC/packaging/linux"
+OPT=/opt/opendeploy
+ETC=/etc/opendeploy
+UNIT_DIR=/etc/systemd/system
+DOMAIN=""
+EMAIL=""
+MODE=""
+CA_BUNDLE=""
+START=1
+FORCE=0
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--domain) DOMAIN="$2"; shift 2 ;;
+	--email) EMAIL="$2"; shift 2 ;;
+	--mode) MODE="$2"; shift 2 ;;
+	--ca-bundle) CA_BUNDLE="$2"; shift 2 ;;
+	--no-start) START=0; shift ;;
+	--force) FORCE=1; shift ;;
+	-h|--help) sed -n '2,14p' "$0"; exit 0 ;;
+	*) echo "unknown option $1" >&2; exit 2 ;;
+	esac
+done
+
+say() { printf '==> %s\n' "$*"; }
+warn() { printf 'warning: %s\n' "$*" >&2; }
+die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+[ "$(id -u)" -eq 0 ] || die "run as root"
+[ -d /run/systemd/system ] || die "systemd is required"
+[ -x "$SRC/bin/platformd" ] || die "no release binaries next to this script ($SRC/bin)"
+VERSION=$("$SRC/bin/opendeployctl" version 2>/dev/null | awk '{print $2}')
+# schema_of prints a release's schema version ("" when it predates
+# reporting one).
+schema_of() { "$1" version 2>/dev/null | sed -n 's/.* schema=\([0-9][0-9]*\).*/\1/p'; }
+SCHEMA=$(schema_of "$SRC/bin/opendeployctl")
+
+# ---- prerequisites ---------------------------------------------------------------
+missing=""
+command -v nft >/dev/null 2>&1 || missing="$missing nftables"
+command -v caddy >/dev/null 2>&1 || missing="$missing caddy"
+[ -S /run/containerd/containerd.sock ] || command -v containerd >/dev/null 2>&1 || missing="$missing containerd"
+{ command -v buildkitd && command -v buildctl; } >/dev/null 2>&1 || missing="$missing buildkit"
+command -v rootlesskit >/dev/null 2>&1 || missing="$missing rootlesskit"
+command -v newuidmap >/dev/null 2>&1 || missing="$missing uidmap"
+# git >= 2.37 pins source fetches to the validated address (SSRF defence).
+if ! command -v git >/dev/null 2>&1; then
+	missing="$missing git"
+elif ! git version | awk '{split($3, v, "."); exit !(v[1] > 2 || (v[1] == 2 && v[2] >= 37))}'; then
+	missing="$missing git>=2.37"
+fi
+if [ -n "$missing" ]; then
+	warn "missing prerequisites:$missing"
+	warn "install them (e.g. apt install nftables containerd uidmap; Caddy and BuildKit from their official releases) and re-run"
+fi
+command -v runsc >/dev/null 2>&1 || warn "gVisor (runsc) not found: Untrusted projects and fork previews will fail closed until it is installed"
+[ -f /sys/fs/cgroup/cgroup.controllers ] || die "cgroup v2 is required"
+
+# ---- users, groups, directories -------------------------------------------------------
+say "creating service users and directories"
+install -D -m 0644 "$PKG/sysusers.d/opendeploy.conf" /usr/lib/sysusers.d/opendeploy.conf
+install -D -m 0644 "$PKG/tmpfiles.d/opendeploy.conf" /usr/lib/tmpfiles.d/opendeploy.conf
+systemd-sysusers /usr/lib/sysusers.d/opendeploy.conf
+if ! grep -q '^od-buildkit:' /etc/subuid 2>/dev/null; then
+	usermod --add-subuids 1000000-1065535 --add-subgids 1000000-1065535 od-buildkit
+fi
+systemd-tmpfiles --create /usr/lib/tmpfiles.d/opendeploy.conf
+install -D -m 0644 "$PKG/sysctl.d/opendeploy.conf" /usr/lib/sysctl.d/60-opendeploy.conf
+sysctl -q -p /usr/lib/sysctl.d/60-opendeploy.conf || warn "could not apply /usr/lib/sysctl.d/60-opendeploy.conf"
+
+# Ubuntu 23.10+ confines unprivileged user namespaces with AppArmor; rootless
+# BuildKit needs them for rootlesskit only. Ubuntu 24.04+ ships a profile for
+# /usr/bin/rootlesskit itself: a second profile for the same path makes the
+# attachment ambiguous and leaves rootlesskit unconfined (user namespaces
+# denied), so ours is installed only where the distribution has none.
+AA_OURS=/etc/apparmor.d/opendeploy-rootlesskit
+if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = 1 ] &&
+	command -v apparmor_parser >/dev/null 2>&1 && [ -x /usr/bin/rootlesskit ]; then
+	if find /etc/apparmor.d -maxdepth 1 -type f ! -name opendeploy-rootlesskit -exec grep -l '/usr/bin/rootlesskit' {} + 2>/dev/null | grep -q .; then
+		say "using the distribution's AppArmor profile for rootlesskit"
+		if [ -f "$AA_OURS" ]; then
+			apparmor_parser -R "$AA_OURS" 2>/dev/null || true
+			rm -f "$AA_OURS"
+		fi
+	else
+		say "allowing user namespaces for rootlesskit (AppArmor)"
+		cat > "$AA_OURS" <<'PROFILE'
+abi <abi/4.0>,
+include <tunables/global>
+
+profile opendeploy-rootlesskit /usr/bin/rootlesskit flags=(unconfined) {
+  userns,
+  include if exists <local/opendeploy-rootlesskit>
+}
+PROFILE
+		apparmor_parser -r "$AA_OURS" || warn "could not load the rootlesskit AppArmor profile"
+	fi
+fi
+
+# ---- release slots -----------------------------------------------------------------
+mkdir -p "$OPT/slots"
+STAGE=1
+ACTIVE=""
+if [ "$FORCE" -eq 0 ] && [ -L "$OPT/slots/current" ] && [ -x "$OPT/slots/current/bin/opendeployctl" ]; then
+	RUNNING=$("$OPT/slots/current/bin/opendeployctl" version 2>/dev/null | awk '{print $2}')
+	# The node may already run a newer release applied by the verified
+	# updater; a package upgrade carrying an older payload must not downgrade it.
+	if [ -n "$RUNNING" ] && [ -n "$VERSION" ] && [ "$RUNNING" != "$VERSION" ] &&
+		[ "$(printf '%s\n%s\n' "${RUNNING#v}" "${VERSION#v}" | sort -V | tail -n1)" = "${RUNNING#v}" ]; then
+		say "keeping the running release $RUNNING (newer than $VERSION)"
+		STAGE=0
+	elif [ "$RUNNING" = "$VERSION" ]; then
+		say "$VERSION is already installed; refreshing configuration only"
+		STAGE=0
+	fi
+fi
+if [ "$STAGE" -eq 0 ]; then
+	:
+elif [ -L "$OPT/slots/current" ]; then
+	ACTIVE=$(readlink "$OPT/slots/current")
+	TARGET=a; [ "$ACTIVE" = a ] && TARGET=b
+	PREV_VERSION=${RUNNING:-}
+	PREV_SCHEMA=$(schema_of "$OPT/slots/$ACTIVE/bin/opendeployctl")
+	say "upgrading: staging $VERSION into slot $TARGET (active: $ACTIVE)"
+else
+	TARGET=a
+	say "installing $VERSION into slot a"
+fi
+if [ "$STAGE" -eq 1 ]; then
+	rm -rf "$OPT/slots/$TARGET.new"
+	mkdir -p "$OPT/slots/$TARGET.new"
+	cp -a "$SRC/bin" "$OPT/slots/$TARGET.new/bin"
+	cp -a "$SRC/packaging" "$OPT/slots/$TARGET.new/packaging"
+	chown -R root:root "$OPT/slots/$TARGET.new"
+	chmod -R go-w "$OPT/slots/$TARGET.new"
+	rm -rf "$OPT/slots/$TARGET"
+	mv "$OPT/slots/$TARGET.new" "$OPT/slots/$TARGET"
+	ln -sfn "$TARGET" "$OPT/slots/.current-tmp"
+	mv -T "$OPT/slots/.current-tmp" "$OPT/slots/current"
+	# hostd reconciles slots/state.json with the running release at start.
+fi
+ln -sfn "$OPT/slots/current" "$OPT/current"
+ln -sfn "$OPT/current/bin/opendeployctl" /usr/local/bin/opendeployctl
+
+# ---- configuration -----------------------------------------------------------------
+install -d -m 0755 "$ETC"
+if [ ! -f "$ETC/node.yaml" ]; then
+	say "writing $ETC/node.yaml"
+	install -m 0640 -g od-ipc "$PKG/etc/node.yaml" "$ETC/node.yaml"
+	[ -n "$DOMAIN" ] && sed -i "s|^  base_domain: \"\"|  base_domain: \"$DOMAIN\"|" "$ETC/node.yaml"
+	[ -n "$EMAIL" ] && sed -i "s|^  acme_email: \"\"|  acme_email: \"$EMAIL\"|" "$ETC/node.yaml"
+	case "$MODE" in
+	"") ;;
+	lan|direct|relay) sed -i "s|^  mode: direct .*|  mode: $MODE|" "$ETC/node.yaml" ;;
+	*) die "invalid --mode $MODE" ;;
+	esac
+fi
+# Extra trust anchors for TLS-inspecting networks: every OpenDeploy service
+# trusts PEM files in $ETC/ca.d (SSL_CERT_DIR), and build steps receive them
+# through build.ca_bundle.
+install -d -m 0755 "$ETC/ca.d"
+if [ -n "$CA_BUNDLE" ]; then
+	[ -f "$CA_BUNDLE" ] && grep -q "BEGIN CERTIFICATE" "$CA_BUNDLE" || die "--ca-bundle $CA_BUNDLE is not a PEM certificate bundle"
+	install -m 0644 "$CA_BUNDLE" "$ETC/ca.d/custom-ca.pem"
+	if grep -q '^  # ca_bundle:' "$ETC/node.yaml"; then
+		sed -i "s|^  # ca_bundle:.*|  ca_bundle: $ETC/ca.d/custom-ca.pem|" "$ETC/node.yaml"
+	elif ! grep -q '^  ca_bundle:' "$ETC/node.yaml"; then
+		warn "add 'ca_bundle: $ETC/ca.d/custom-ca.pem' under build: in $ETC/node.yaml"
+	fi
+fi
+[ -f "$PKG/etc/tuf-root.json" ] && [ ! -f "$ETC/tuf-root.json" ] && install -m 0644 "$PKG/etc/tuf-root.json" "$ETC/tuf-root.json"
+"$OPT/current/bin/opendeployctl" admin caddy-config --config "$ETC/node.yaml" > "$ETC/caddy.json.tmp"
+chmod 0644 "$ETC/caddy.json.tmp"
+mv "$ETC/caddy.json.tmp" "$ETC/caddy.json"
+
+# ---- systemd -----------------------------------------------------------------------
+say "installing systemd units"
+for u in "$PKG"/systemd/*.service "$PKG"/systemd/opendeploy.target; do
+	install -m 0644 "$u" "$UNIT_DIR/$(basename "$u")"
+done
+systemctl daemon-reload
+systemctl enable opendeploy.target >/dev/null
+# ready waits for the readiness gate: platformd's database is healthy and
+# every Tier-0 service answers.
+ready() {
+	for i in $(seq 1 "${OPENDEPLOY_READY_TIMEOUT:-120}"); do
+		if curl -fsS http://127.0.0.1:8080/readyz >/dev/null 2>&1; then return 0; fi
+		sleep 1
+	done
+	return 1
+}
+if [ "$START" -eq 1 ]; then
+	say "starting OpenDeploy"
+	systemctl restart opendeploy.target
+	if ! ready; then
+		waiting=$(curl -sS http://127.0.0.1:8080/readyz 2>/dev/null || echo "platformd not answering")
+		if [ "$STAGE" -eq 1 ] && [ -n "$ACTIVE" ]; then
+			# Same rule as the verified updater: a release that moves the
+			# schema forward cannot be rolled back automatically (the old
+			# binaries may not read the migrated data).
+			if [ -z "$SCHEMA" ] || [ -z "$PREV_SCHEMA" ] || [ "$SCHEMA" -gt "$PREV_SCHEMA" ]; then
+				die "$VERSION did not become ready ($waiting) after a possible schema migration; automatic rollback is unsafe. Inspect: journalctl -u 'opendeploy-*'; runbook R4 in docs/runbooks.md"
+			fi
+			warn "$VERSION did not become ready ($waiting); rolling back to slot $ACTIVE${PREV_VERSION:+ ($PREV_VERSION)}"
+			ln -sfn "$ACTIVE" "$OPT/slots/.current-tmp"
+			mv -T "$OPT/slots/.current-tmp" "$OPT/slots/current"
+			"$OPT/current/bin/opendeployctl" admin caddy-config --config "$ETC/node.yaml" > "$ETC/caddy.json.tmp" && chmod 0644 "$ETC/caddy.json.tmp" && mv "$ETC/caddy.json.tmp" "$ETC/caddy.json"
+			systemctl restart opendeploy.target
+			ready || warn "the previous release is not ready either; inspect journalctl -u 'opendeploy-*'"
+			die "upgrade to $VERSION failed its readiness gate and was rolled back${PREV_VERSION:+ to $PREV_VERSION}"
+		fi
+		warn "OpenDeploy is not ready yet ($waiting); inspect journalctl -u 'opendeploy-*'"
+	fi
+fi
+
+echo
+say "OpenDeploy $VERSION installed"
+if TOKEN=$("$OPT/current/bin/opendeployctl" admin bootstrap-token --config "$ETC/node.yaml" 2>/dev/null); then
+	echo "    Open http://127.0.0.1:8080 (tunnel it over SSH for remote access) and create the owner"
+	echo "    account with this one-time bootstrap token:"
+	echo
+	echo "        $TOKEN"
+	echo
+fi
+echo "    Check the host with: opendeployctl doctor"

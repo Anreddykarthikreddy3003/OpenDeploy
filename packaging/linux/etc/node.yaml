@@ -1,0 +1,65 @@
+# OpenDeploy node configuration (/etc/opendeploy/node.yaml).
+# Reference: docs/configuration.md. Restart opendeploy.target after edits.
+
+profile: standard            # tiny | standard | performance
+
+api:
+  listen: 127.0.0.1:8080     # dashboard/API; loopback unless remote admin is configured
+  public_url: ""             # e.g. https://deploy.example.com (required for security keys remotely)
+  # remote_admin:              # see docs/configuration.md#remote-administration
+  #   enabled: true
+  #   acknowledged_risk: true   # non-loopback binds are refused without this
+  #   allowed_cidrs: [10.0.0.0/8]
+  #   tls_cert: /etc/opendeploy/admin.crt
+  #   tls_key: /etc/opendeploy/admin.key
+
+ingress:
+  mode: direct               # lan | direct | relay
+  base_domain: ""            # generated app URLs: <project>.<base_domain> (wildcard DNS -> this node)
+  acme_email: ""
+  public_ipv4: ""            # used to validate custom-domain DNS
+  http_port: 80
+  https_port: 443
+  caddy_admin_socket: /run/opendeploy/caddy/admin.sock
+  # relay:
+  #   server_addr: tunnel.relay.example.net:8443
+  #   tenant_id: acme
+  #   instance_id: home-1
+  #   public_suffix: relay.example.net
+  #   enroll_token_file: /etc/opendeploy/relay-token
+
+runtime:
+  backend: containerd        # containerd | docker
+  containerd_socket: /run/containerd/containerd.sock
+  # containerd_snapshotter: overlayfs   # e.g. native, btrfs, zfs
+
+build:
+  executor: buildkit         # buildkit (rootless buildkitd) | docker
+  # untrusted_buildkit_addr: unix:///run/opendeploy/buildkit-sandbox/buildkitd.sock
+  # ca_bundle: /etc/ssl/certs/corporate-ca.pem   # TLS-inspection CA for registry pulls and build steps
+
+egress:
+  enforce: true
+
+backup:
+  enabled: false
+  schedule: "@daily"
+  # S3-compatible target (credentials must not allow DeleteObject; enable object lock):
+  # endpoint: s3.eu-central-1.amazonaws.com
+  # bucket: my-opendeploy-backups
+  # access_key_file: /etc/opendeploy/backup-access-key
+  # secret_key_file: /etc/opendeploy/backup-secret-key
+  # object_lock: true
+  # retain_days: 30
+
+update:
+  repository_url: ""         # e.g. https://updates.opendeploy.dev
+  trusted_root: /etc/opendeploy/tuf-root.json
+  channel: stable
+  slots_dir: /opt/opendeploy/slots
+
+audit:
+  forward: []                # off-host copies of the audit chain, e.g.
+  #  - name: siem
+  #    url: https://logs.example.com/opendeploy-audit
+  #    token_file: /etc/opendeploy/audit-forward-token

@@ -1,0 +1,6 @@
+#!/bin/sh
+# Upgrade: stop the running service before its files are replaced.
+if [ -x /Library/OpenDeploy/bin/opendeploy-desktop ]; then
+	/Library/OpenDeploy/bin/opendeploy-desktop stop >/dev/null 2>&1 || true
+fi
+exit 0

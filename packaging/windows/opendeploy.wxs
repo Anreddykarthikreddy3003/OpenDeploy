@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  OpenDeploy for Windows (WiX Toolset v4+):
+
+    wix build -arch x64 -d Version=2.1.0 -d BinDir=dist\windows\bin -d GuestDir=dist\guest\wsl2-amd64 ^
+      packaging\windows\opendeploy.wxs -o dist\OpenDeploy-2.1.0-x64.msi
+
+  Installs opendeploy-desktop and opendeployctl under Program Files and the
+  managed WSL distribution image, then registers the OpenDeploy Windows
+  service (dedicated service account, starts at boot without a user login).
+  Uninstall removes the service; node data in %ProgramData%\OpenDeploy is
+  kept unless `opendeploy-desktop uninstall -purge` is run first.
+  Sign the MSI and binaries with Authenticode before distribution.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="OpenDeploy" Manufacturer="OpenDeploy" Version="$(var.Version)"
+           UpgradeCode="531018ef-ac44-4393-8356-ae68d033559a" Scope="perMachine" Compressed="yes" InstallerVersion="500">
+    <SummaryInformation Description="OpenDeploy - local-first deployment platform" />
+    <!-- Stop the running service before the old version's files are replaced. -->
+    <MajorUpgrade Schedule="afterInstallInitialize" DowngradeErrorMessage="A newer version of OpenDeploy is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Launch Condition="Installed OR VersionNT64 &gt;= 603" Message="OpenDeploy requires 64-bit Windows 10 or later with WSL 2." />
+
+    <StandardDirectory Id="System64Folder" />
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="OpenDeploy">
+        <Directory Id="BinDir" Name="bin">
+          <Component Id="DesktopExe" Guid="*">
+            <File Id="DesktopExeFile" Source="$(var.BinDir)\opendeploy-desktop.exe" KeyPath="yes" />
+          </Component>
+          <Component Id="CtlExe" Guid="*">
+            <File Id="CtlExeFile" Source="$(var.BinDir)\opendeployctl.exe" KeyPath="yes" />
+            <Environment Id="PathEntry" Name="PATH" Value="[BinDir]" Permanent="no" Part="last" Action="set" System="yes" />
+          </Component>
+        </Directory>
+        <Directory Id="GuestDir" Name="guest">
+          <Component Id="GuestImage" Guid="*">
+            <File Id="GuestImageFile" Source="$(var.GuestDir)\opendeploy.wsl" KeyPath="yes" />
+          </Component>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="OpenDeploy" Level="1">
+      <ComponentRef Id="DesktopExe" />
+      <ComponentRef Id="CtlExe" />
+      <ComponentRef Id="GuestImage" />
+    </Feature>
+
+    <CustomAction Id="StopForUpgrade" Directory="System64Folder" ExeCommand="&quot;[System64Folder]net.exe&quot; stop OpenDeploy"
+                  Execute="deferred" Impersonate="no" Return="ignore" />
+    <CustomAction Id="InstallService" FileRef="DesktopExeFile" ExeCommand="install" Execute="deferred" Impersonate="no" Return="check" />
+    <CustomAction Id="UninstallService" FileRef="DesktopExeFile" ExeCommand="uninstall" Execute="deferred" Impersonate="no" Return="ignore" />
+
+    <InstallExecuteSequence>
+      <Custom Action="StopForUpgrade" Before="RemoveExistingProducts" Condition="WIX_UPGRADE_DETECTED" />
+      <Custom Action="UninstallService" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom Action="InstallService" Before="InstallFinalize" Condition="NOT REMOVE" />
+    </InstallExecuteSequence>
+  </Package>
+</Wix>

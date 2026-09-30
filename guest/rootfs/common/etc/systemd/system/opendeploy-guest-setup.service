@@ -1,0 +1,18 @@
+[Unit]
+Description=OpenDeploy guest first-boot setup
+Documentation=https://github.com/anreddykarthikreddy3003/opendeploy
+ConditionPathExists=!/opt/opendeploy/slots/current
+After=network-online.target containerd.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Desktop nodes: LAN ingress (plain HTTP) with generated app URLs under
+# *.localhost, which browsers resolve to the loopback.
+ExecStart=/usr/lib/opendeploy/release/packaging/linux/install.sh --no-start --mode lan --domain localhost
+ExecStartPost=/usr/bin/systemctl start --no-block opendeploy.target
+TimeoutStartSec=15min
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,14 @@
+/bin/
+/dist/
+/web/node_modules/
+/web/dist/*
+!/web/dist/.keep
+*.test
+*.out
+coverage.*
+/.tmp/
+/tests/e2e/.artifacts/
+/web/*.tsbuildinfo
+/opendeployctl
+/opendeployctl.exe
+.gate/

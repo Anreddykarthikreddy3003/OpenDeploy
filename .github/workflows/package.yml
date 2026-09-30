@@ -1,0 +1,392 @@
+name: package
+# Builds every installable artifact the way a release does and proves each
+# one on a real host:
+#   deb-install  deb on a systemd runner; apps deploy through the installed
+#                node; in-place upgrade into the other slot; removal
+#   upgrade      previous release -> this build with live data; releases
+#                that fail the readiness gate are rolled back (or stopped
+#                when the schema may have moved)
+#   guest        the managed Linux guest (WSL2 rootfs, VM image) booted under
+#                systemd and under QEMU/KVM with the vsock bridge
+#   windows      MSI install -> Windows service + service account -> status ->
+#                uninstall
+#   macos        pkg install -> launchd daemon -> status -> uninstall
+# Hosted Windows/macOS runners cannot run nested virtualization, so the WSL2
+# and Virtualization.framework boots themselves are covered by the guest job.
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+  workflow_call: # release gate: builds the release's installers (release.yml)
+    inputs:
+      version:
+        description: release version (tag without the v); empty = snapshot
+        type: string
+        default: ""
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: dashboard
+        run: cd web && npm ci && npm run build
+      - name: build packages (release config, snapshot)
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          # Tagged releases build real (non-snapshot) packages so the guest
+          # images and installers carry the release version.
+          args: release ${{ inputs.version == '' && '--snapshot' || '' }} --clean --skip=before,sign,sbom,publish,validate,announce
+      - name: package metadata
+        run: |
+          dpkg-deb -I dist/opendeploy_*_linux-amd64.deb
+          dpkg-deb -c dist/opendeploy_*_linux-amd64.deb | grep -q './usr/lib/opendeploy/release/packaging/linux/install.sh'
+          dpkg-deb -c dist/opendeploy_*_linux-amd64.deb | grep -q './usr/lib/opendeploy/release/bin/opendeploy-guest-agent'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          retention-days: 7
+          path: |
+            dist/*.deb
+            dist/*.rpm
+            dist/opendeployctl_*_windows-*.zip
+            dist/opendeployctl_*_darwin-*.tar.gz
+
+  deb-install:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      OPENDEPLOY_REQUIRE_CAPS: "1" # capability skips fail (internal/testcap)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: dist
+      - name: host prerequisites (Caddy, rootless BuildKit, nftables)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q nftables uidmap slirp4netns
+          curl -fsSL https://github.com/caddyserver/caddy/releases/download/v2.10.2/caddy_2.10.2_linux_amd64.tar.gz | sudo tar -xz -C /usr/bin caddy
+          curl -fsSL https://github.com/moby/buildkit/releases/download/v0.23.2/buildkit-v0.23.2.linux-amd64.tar.gz | sudo tar -xz -C /usr --wildcards 'bin/buildkitd' 'bin/buildctl' 'bin/buildkit-runc'
+          curl -fsSL https://github.com/rootless-containers/rootlesskit/releases/download/v2.3.5/rootlesskit-x86_64.tar.gz | sudo tar -xz -C /usr/bin rootlesskit rootlessctl
+          test -S /run/containerd/containerd.sock
+      - name: install the package
+        run: |
+          sudo OPENDEPLOY_NO_START=1 dpkg -i dist/opendeploy_*_linux-amd64.deb
+          # LAN mode: plain HTTP on :80 for generated hosts under od.test.
+          sudo sed -i -e 's|^  mode: direct .*|  mode: lan|' -e 's|^  base_domain: "".*|  base_domain: "od.test"|' /etc/opendeploy/node.yaml
+          sudo systemctl start opendeploy.target
+          opendeployctl version
+      - name: installed node works end to end
+        run: sudo -E env "PATH=$PATH" go test -tags pkginstall -count=1 -timeout 30m -v -run TestInstalledNode ./tests/package/
+      - name: re-install upgrades into the other slot and keeps state
+        run: |
+          sudo /usr/lib/opendeploy/release/packaging/linux/install.sh --force
+          readlink /opt/opendeploy/slots/current | grep -qx b
+          sudo systemctl is-active opendeploy-platformd.service
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8080/healthz && break; sleep 1; done
+          curl -fsS -H 'Host: static.od.test' http://127.0.0.1/ | grep -q 'hello from static'
+          sudo cat /opt/opendeploy/slots/state.json
+          sudo python3 -c 'import json; s=json.load(open("/opt/opendeploy/slots/state.json")); assert s["active"]=="b" and s["previous"]=="a", s'
+      - name: remove
+        run: |
+          sudo dpkg -r opendeploy
+          ! systemctl is-active --quiet opendeploy-platformd.service
+          test -d /var/lib/opendeploy/platformd
+      - name: service journals
+        if: failure()
+        run: sudo journalctl --no-pager -n 400 -u 'opendeploy-*' || true
+      - name: rootless BuildKit diagnostics
+        if: failure()
+        run: |
+          set +e -x
+          cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns /proc/sys/kernel/unprivileged_userns_clone /proc/sys/user/max_user_namespaces || true
+          ls -l /etc/apparmor.d | grep -i -e rootless -e opendeploy || true
+          sudo aa-status 2>/dev/null | grep -i -e rootless -e opendeploy || true
+          sudo dmesg | grep -i -e 'apparmor="DENIED"' -e userns | tail -20 || true
+          grep od-buildkit /etc/subuid /etc/subgid || true
+          ls -l /usr/bin/newuidmap /usr/bin/newgidmap || true
+          sudo -u od-buildkit unshare --user --map-root-user true; echo "unshare: $?"
+          sudo -u od-buildkit /usr/bin/rootlesskit --net=host true; echo "rootlesskit direct: $?"
+          sudo systemd-run --wait --pipe -p User=od-buildkit -p ProtectHome=yes -p Delegate=yes /usr/bin/rootlesskit --net=host true; echo "rootlesskit systemd-run: $?"
+          sudo cat /proc/$(pgrep -n -f 'rootlesskit' || echo self)/attr/current || true
+
+  upgrade:
+    # Upgrade from the previous release (latest v* tag; before the first
+    # tag, UPGRADE_BASELINE) with live data, then prove the readiness gate:
+    # a release that never becomes ready is rolled back automatically, and
+    # one that may have migrated the schema is stopped for the operator.
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      OPENDEPLOY_REQUIRE_CAPS: "1"
+      OPENDEPLOY_PKG_STATE: /tmp/od-owner.json
+      UPGRADE_BASELINE: f883e2c2f00a66d5276dea4327ad6478290c2b14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: dist
+      - name: host prerequisites (Caddy, rootless BuildKit, nftables)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q nftables uidmap slirp4netns
+          curl -fsSL https://github.com/caddyserver/caddy/releases/download/v2.10.2/caddy_2.10.2_linux_amd64.tar.gz | sudo tar -xz -C /usr/bin caddy
+          curl -fsSL https://github.com/moby/buildkit/releases/download/v0.23.2/buildkit-v0.23.2.linux-amd64.tar.gz | sudo tar -xz -C /usr --wildcards 'bin/buildkitd' 'bin/buildctl' 'bin/buildkit-runc'
+          curl -fsSL https://github.com/rootless-containers/rootlesskit/releases/download/v2.3.5/rootlesskit-x86_64.tar.gz | sudo tar -xz -C /usr/bin rootlesskit rootlessctl
+      - name: check out the baseline release
+        run: |
+          base=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || echo "$UPGRADE_BASELINE")
+          echo "upgrading from $base"
+          git worktree add "$RUNNER_TEMP/baseline" "$base"
+          cd "$RUNNER_TEMP/baseline"
+          # Only the linux/amd64 node package, versioned below this build.
+          sed -i -e 's/goarch: \[amd64, arm64\]/goarch: [amd64]/g' -e 's/goos: \[linux, darwin, windows\]/goos: [linux]/' \
+            -e 's/version_template: .*/version_template: "0.0.0-baseline"/' .goreleaser.yaml
+          cd web && npm ci && npm run build
+      - name: build the baseline package
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          workdir: ${{ runner.temp }}/baseline
+          args: release --snapshot --clean --skip=before,sign,sbom,publish,validate,announce
+      - name: install the baseline and deploy on it
+        run: |
+          sudo OPENDEPLOY_NO_START=1 dpkg -i "$RUNNER_TEMP"/baseline/dist/opendeploy_*_linux-amd64.deb
+          sudo sed -i -e 's|^  mode: direct .*|  mode: lan|' -e 's|^  base_domain: "".*|  base_domain: "od.test"|' /etc/opendeploy/node.yaml
+          sudo systemctl start opendeploy.target
+          opendeployctl version | tee /dev/stderr | grep -q baseline
+          # Older releases fail a deploy submitted before egressd is listening.
+          for i in $(seq 1 90); do sudo test -S /run/opendeploy/egressd.sock && break; sleep 1; done
+          sudo -E env "PATH=$PATH" go test -tags pkginstall -count=1 -timeout 30m -v -run 'TestInstalledNode/^(units|deploy)$/^static$' ./tests/package/
+      - name: upgrade to this build keeps users, projects, apps and the audit chain
+        run: |
+          sudo dpkg -i dist/opendeploy_*_linux-amd64.deb
+          opendeployctl version | tee /dev/stderr | grep -vq baseline
+          readlink /opt/opendeploy/slots/current | grep -qx b
+          sudo -E env "PATH=$PATH" go test -tags pkginstall -count=1 -timeout 20m -v -run TestUpgradedNode ./tests/package/
+      - name: a release that never becomes ready is rolled back
+        run: |
+          schema=$(opendeployctl version | sed -n 's/.* schema=\([0-9]*\).*/\1/p')
+          sh tests/package/broken-deb.sh dist/opendeploy_*_linux-amd64.deb "$RUNNER_TEMP/broken.deb" 9.9.9-broken "$schema"
+          if sudo env OPENDEPLOY_READY_TIMEOUT=30 dpkg -i "$RUNNER_TEMP/broken.deb" 2>"$RUNNER_TEMP/err"; then
+            echo "::error::a release that never became ready was accepted"; exit 1
+          fi
+          cat "$RUNNER_TEMP/err"
+          grep -q "rolled back" "$RUNNER_TEMP/err"
+          readlink /opt/opendeploy/slots/current | grep -qx b
+          opendeployctl version | grep -vq broken
+          curl -fsS http://127.0.0.1:8080/readyz
+          curl -fsS -H 'Host: static.od.test' http://127.0.0.1/ | grep -q 'hello from static'
+      - name: a release that may have migrated the schema is stopped, not rolled back
+        run: |
+          schema=$(opendeployctl version | sed -n 's/.* schema=\([0-9]*\).*/\1/p')
+          sh tests/package/broken-deb.sh dist/opendeploy_*_linux-amd64.deb "$RUNNER_TEMP/broken2.deb" 9.9.10-broken $((schema + 1))
+          if sudo env OPENDEPLOY_READY_TIMEOUT=20 dpkg -i "$RUNNER_TEMP/broken2.deb" 2>"$RUNNER_TEMP/err"; then
+            echo "::error::a release that never became ready was accepted"; exit 1
+          fi
+          cat "$RUNNER_TEMP/err"
+          grep -q "automatic rollback is unsafe" "$RUNNER_TEMP/err"
+          readlink /opt/opendeploy/slots/current | grep -qx a
+          # Runbook R4: point current back at the previous slot and restart.
+          sudo ln -sfn b /opt/opendeploy/slots/.current-tmp
+          sudo mv -T /opt/opendeploy/slots/.current-tmp /opt/opendeploy/slots/current
+          sudo systemctl restart opendeploy.target
+          for i in $(seq 1 90); do curl -fsS http://127.0.0.1:8080/readyz && break; sleep 1; done
+          curl -fsS -H 'Host: static.od.test' http://127.0.0.1/ | grep -q 'hello from static'
+      - name: reinstalling the good package repairs the package state
+        run: |
+          sudo dpkg -i dist/opendeploy_*_linux-amd64.deb
+          dpkg -s opendeploy | grep -q '^Status: install ok installed'
+          curl -fsS http://127.0.0.1:8080/readyz
+      - name: service journals
+        if: failure()
+        run: sudo journalctl --no-pager -n 400 -u 'opendeploy-*' || true
+
+  guest:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: dist
+      - uses: docker/setup-qemu-action@v3
+        if: matrix.arch == 'arm64'
+      - name: build the WSL2 distribution
+        run: guest/build.sh --deb dist/opendeploy_*_linux-${{ matrix.arch }}.deb --arch ${{ matrix.arch }} --kind wsl2 --out out/wsl2-${{ matrix.arch }}
+      - name: boot-test the WSL2 rootfs under systemd
+        if: matrix.arch == 'amd64'
+        run: guest/test-wsl-rootfs.sh out/wsl2-amd64/opendeploy.wsl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: guest-wsl2-${{ matrix.arch }}
+          retention-days: 7
+          path: out/wsl2-${{ matrix.arch }}
+      - name: build the VM image
+        run: |
+          docker image prune -af >/dev/null
+          guest/build.sh --deb dist/opendeploy_*_linux-${{ matrix.arch }}.deb --arch ${{ matrix.arch }} --kind vz --out out/vz-${{ matrix.arch }}
+      - name: boot-test the VM image under QEMU/KVM (vsock bridge)
+        if: matrix.arch == 'amd64'
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q qemu-system-x86
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          guest/test-vz-qemu.sh out/vz-amd64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: guest-vz-${{ matrix.arch }}
+          retention-days: 7
+          path: out/vz-${{ matrix.arch }}
+
+  windows:
+    needs: guest
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: guest-wsl2-amd64
+          path: dist/guest/wsl2-amd64
+      - name: unit tests
+        run: go test -count=1 ./internal/desktop/... ./cmd/opendeploy-desktop/...
+      - name: build binaries
+        run: |
+          go build -trimpath -ldflags "-s -w -X main.version=${{ inputs.version || '0.0.1' }}" -o out/bin/opendeploy-desktop.exe ./cmd/opendeploy-desktop
+          $zip = Get-ChildItem dist/opendeployctl_*_windows-amd64.zip | Select-Object -First 1
+          Expand-Archive $zip.FullName -DestinationPath out/ctl
+          Copy-Item out/ctl/bin/opendeployctl.exe out/bin/
+          ./out/bin/opendeploy-desktop.exe version
+      - name: build the MSI
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          # MSI versions are numeric: drop any pre-release suffix.
+          $v = '${{ inputs.version || '0.0.1' }}' -replace '-.*$', ''
+          wix build -arch x64 -d Version=$v -d BinDir=out\bin -d GuestDir=dist\guest\wsl2-amd64 packaging\windows\opendeploy.wxs -o out\OpenDeploy-x64.msi
+      - name: install -> service, account and status
+        run: |
+          $p = Start-Process msiexec.exe -ArgumentList '/i', 'out\OpenDeploy-x64.msi', '/qn', '/l*v', 'msi-install.log' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "msiexec install exit $($p.ExitCode)" }
+          $svc = Get-Service OpenDeploy
+          $svc | Format-List Name, Status, StartType
+          (Get-CimInstance Win32_Service -Filter "Name='OpenDeploy'").StartName
+          Get-LocalUser opendeploy-svc | Format-List Name, Enabled
+          $status = "$env:ProgramData\OpenDeploy\status.json"
+          for ($i = 0; $i -lt 60 -and -not (Test-Path $status); $i++) { Start-Sleep 2 }
+          if (-not (Test-Path $status)) { throw "no status.json" }
+          Get-Content $status
+          & 'C:\Program Files\OpenDeploy\bin\opendeploy-desktop.exe' status
+          if ((Get-Service OpenDeploy).Status -ne 'Running') { throw "service not running" }
+      - name: uninstall
+        run: |
+          $p = Start-Process msiexec.exe -ArgumentList '/x', 'out\OpenDeploy-x64.msi', '/qn', '/l*v', 'msi-uninstall.log' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "msiexec uninstall exit $($p.ExitCode)" }
+          if (Get-Service OpenDeploy -ErrorAction SilentlyContinue) { throw "service still registered" }
+          if (Test-Path 'C:\Program Files\OpenDeploy\bin\opendeploy-desktop.exe') { throw "files left behind" }
+      - name: logs
+        if: failure()
+        run: |
+          Get-Content msi-install.log -Tail 200 -ErrorAction SilentlyContinue
+          Get-Content msi-uninstall.log -Tail 100 -ErrorAction SilentlyContinue
+          Get-Content "$env:ProgramData\OpenDeploy\desktop.log" -ErrorAction SilentlyContinue
+      - uses: actions/upload-artifact@v4
+        with:
+          name: msi-x64
+          retention-days: 7
+          path: out/OpenDeploy-x64.msi
+
+  macos:
+    needs: guest
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: guest-vz-arm64
+          path: dist/guest/vz-arm64
+      - name: unit tests
+        run: go test -count=1 ./internal/desktop/... ./cmd/opendeploy-desktop/...
+      - name: build binaries (cgo, Virtualization.framework)
+        run: |
+          CGO_ENABLED=1 go build -trimpath -ldflags "-s -w -X main.version=${{ inputs.version || '0.0.1' }}" -o out/bin/opendeploy-desktop ./cmd/opendeploy-desktop
+          mkdir -p out/ctl && tar -xzf dist/opendeployctl_*_darwin-arm64.tar.gz -C out/ctl
+          cp out/ctl/bin/opendeployctl out/bin/
+          out/bin/opendeploy-desktop version
+      - name: build the pkg
+        run: packaging/macos/build-pkg.sh --version ${{ inputs.version || '0.0.1' }} --bin out/bin --guest dist/guest/vz-arm64 --out out/OpenDeploy-arm64.pkg
+      - name: install -> launchd daemon and status
+        run: |
+          sudo installer -pkg out/OpenDeploy-arm64.pkg -target /
+          sudo launchctl print system/io.github.anreddykarthikreddy3003.opendeploy.desktop | head -20
+          for i in $(seq 1 60); do sudo test -f "/Library/Application Support/OpenDeploy/status.json" && break; sleep 2; done
+          sudo cat "/Library/Application Support/OpenDeploy/status.json"
+          sudo opendeploy-desktop status
+      - name: uninstall
+        run: |
+          sudo /Library/OpenDeploy/uninstall.sh --purge
+          ! sudo launchctl print system/io.github.anreddykarthikreddy3003.opendeploy.desktop >/dev/null 2>&1
+          test ! -e /Library/OpenDeploy
+      - name: logs
+        if: failure()
+        run: |
+          sudo cat "/Library/Application Support/OpenDeploy/desktop.log" || true
+          sudo cat /Library/Logs/OpenDeploy/desktop.err.log || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pkg-arm64
+          retention-days: 7
+          path: out/OpenDeploy-arm64.pkg

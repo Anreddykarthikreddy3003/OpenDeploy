@@ -1,0 +1,43 @@
+[Unit]
+Description=OpenDeploy relay tunnel agent
+Documentation=https://github.com/anreddykarthikreddy3003/opendeploy
+PartOf=opendeploy.target
+After=network-online.target opendeploy-routemgr.service
+Wants=network-online.target
+
+[Service]
+# Extra trust anchors (enterprise TLS inspection): PEM files in /etc/opendeploy/ca.d.
+Environment=SSL_CERT_DIR=/etc/ssl/certs:/etc/opendeploy/ca.d
+Type=simple
+User=od-relay-agent
+Group=od-relay-agent
+SupplementaryGroups=od-ipc
+ExecStart=/opt/opendeploy/current/bin/relay-agent --config /etc/opendeploy/node.yaml
+Restart=always
+RestartSec=2
+ReadWritePaths=/var/lib/opendeploy/relay-agent /run/opendeploy
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+UMask=0077
+
+[Install]
+WantedBy=opendeploy.target

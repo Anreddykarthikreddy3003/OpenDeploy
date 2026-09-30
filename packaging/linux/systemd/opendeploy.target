@@ -1,0 +1,8 @@
+[Unit]
+Description=OpenDeploy platform
+Documentation=https://github.com/anreddykarthikreddy3003/opendeploy
+Wants=opendeploy-hostd.service opendeploy-auditd.service opendeploy-secretd.service opendeploy-artifactd.service opendeploy-buildkitd.service opendeploy-builderd.service opendeploy-runtimed.service opendeploy-caddy.service opendeploy-routemgr.service opendeploy-egressd.service opendeploy-platformd.service
+After=network-online.target
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,144 @@
+name: release
+# Tag push -> release gate (every suite on the tagged commit: unit and
+# integration, e2e deploys, adversarial + fuzz + vulnerability scan, and the
+# installers on real hosts) -> goreleaser (binaries, SBOMs, cosign keyless
+# signature over the checksums) -> Windows/macOS installers and guest images
+# attached -> SLSA build provenance -> TUF publication for node updates.
+# Nothing is published unless the whole gate is green (PRD §30.1).
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: read
+jobs:
+  gate-ci:
+    uses: ./.github/workflows/ci.yml
+  gate-e2e:
+    uses: ./.github/workflows/e2e.yml
+  gate-security:
+    uses: ./.github/workflows/security-gate.yml
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - id: v
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+  gate-package:
+    needs: meta
+    uses: ./.github/workflows/package.yml
+    with:
+      version: ${{ needs.meta.outputs.version }}
+
+  release:
+    needs: [gate-ci, gate-e2e, gate-security, gate-package]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create the GitHub release
+      id-token: write   # keyless cosign signing
+    outputs:
+      hashes: ${{ steps.hash.outputs.hashes }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: sigstore/cosign-installer@v3
+      - uses: anchore/sbom-action/download-syft@v0
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Installers and guest images (built and tested by the gate)
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "{msi-*,pkg-*,guest-*}"
+          path: installers
+      - name: Attach installers
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          v="${GITHUB_REF_NAME#v}"
+          mkdir -p assets
+          cp installers/msi-x64/OpenDeploy-x64.msi "assets/OpenDeploy-${v}-x64.msi"
+          cp installers/pkg-arm64/OpenDeploy-arm64.pkg "assets/OpenDeploy-${v}-arm64.pkg"
+          for d in installers/guest-*; do
+            name=$(basename "$d"); tar -C "$d" -cf "assets/opendeploy-${name}_${v}.tar" .
+          done
+          (cd assets && sha256sum * > installers-checksums.txt)
+          cosign sign-blob --yes --bundle assets/installers-checksums.txt.sigstore.json assets/installers-checksums.txt
+          gh release upload "$GITHUB_REF_NAME" assets/* --clobber
+          cat assets/installers-checksums.txt >> dist/checksums.txt
+      - id: hash
+        run: echo "hashes=$(cat dist/checksums.txt | base64 -w0)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: node-archives
+          path: dist/opendeploy_*.tar.gz
+
+  provenance:
+    needs: release
+    permissions:
+      actions: read
+      id-token: write
+      contents: write
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    with:
+      base64-subjects: ${{ needs.release.outputs.hashes }}
+      upload-assets: true
+
+  tuf-publish:
+    # Publishes the node archives to the TUF update repository with the
+    # online keys (targets/snapshot/timestamp). Root keys never touch CI.
+    needs: [release, provenance]
+    if: vars.TUF_REPO_BRANCH != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@v4
+        with:
+          name: node-archives
+          path: dist
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ vars.TUF_REPO_BRANCH }}
+          path: tuf-repo
+      - name: Online keys
+        run: |
+          set -euo pipefail
+          umask 077; mkdir -p tuf-keys
+          echo "${{ secrets.TUF_TARGETS_KEY }}"   > tuf-keys/targets-1.key
+          echo "${{ secrets.TUF_SNAPSHOT_KEY }}"  > tuf-keys/snapshot-1.key
+          echo "${{ secrets.TUF_TIMESTAMP_KEY }}" > tuf-keys/timestamp-1.key
+      - name: Publish
+        run: |
+          set -euo pipefail
+          v="${GITHUB_REF_NAME#v}"
+          args=()
+          for f in dist/opendeploy_${v}_linux-*.tar.gz; do
+            plat="${f##*_}"; plat="${plat%.tar.gz}"
+            args+=(--artifact "${plat}=${f}")
+          done
+          channel=stable
+          case "$v" in *-*) channel=beta;; esac
+          go run ./tools/opendeploy-release publish --repo tuf-repo --keys tuf-keys --channel "$channel" --version "$v" "${args[@]}"
+          rm -rf tuf-keys
+      - name: Push
+        run: |
+          cd tuf-repo
+          git config user.name "opendeploy-release"
+          git config user.email "release@users.noreply.github.com"
+          git add -A && git commit -m "Publish ${GITHUB_REF_NAME}" && git push
