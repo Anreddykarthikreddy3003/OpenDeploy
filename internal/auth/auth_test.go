@@ -120,7 +120,7 @@ func TestRBACMatrix(t *testing.T) {
 
 func TestVerifyPasswordRejectsDegenerateHashes(t *testing.T) {
 	for _, h := range []string{
-		"$argon2id$v=19$m=65536,t=3,p=2$c2FsdHNhbHRzYWx0$",                         // empty key: would match anything
+		"$argon2id$v=19$m=65536,t=3,p=2$c2FsdHNhbHRzYWx0$",                       // empty key: would match anything
 		"$argon2id$v=19$m=65536,t=3,p=0$c2FsdHNhbHRzYWx0$AAAAAAAAAAAAAAAAAAAAAA", // p=0 panics argon2
 		"$argon2id$v=19$m=65536,t=0,p=2$c2FsdHNhbHRzYWx0$AAAAAAAAAAAAAAAAAAAAAA",
 	} {
