@@ -25,6 +25,7 @@ OpenDeploy is built on the assumption that the code it runs may be hostile.
 
 | Document | Contents |
 |---|---|
+| [Production readiness](docs/production-readiness.md) | What is proven and how, what the readiness pass fixed, what remains before GA |
 | [Install](docs/install.md) | Linux packages, the Windows MSI, the macOS pkg, first login |
 | [Configuration](docs/configuration.md) | Every `node.yaml` key |
 | [Operations](docs/operations.md) | Deployments, backups, updates, domains, diagnostics |

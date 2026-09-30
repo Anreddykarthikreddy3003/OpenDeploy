@@ -187,6 +187,19 @@ Both are covered by `router_test.go` and the package test's `deploy/chaos` seque
 
 Details are in the M8 commit message.
 
+**Production-readiness pass:**
+
+| Finding | Status |
+|---|---|
+| A crafted source upload could write outside the source tree through chained symlinks. | Fixed (`TestArchiveSourceSafety`) |
+| Three ways past MFA with only a password: TOTP confirm brute force and replay, TOTP enrollment on a key-only account, a pending session promoted when TOTP was turned off. | Fixed (`TestAuthMFAAndSessions`) |
+| Rate-limiter flood reset, lockout password oracle, second-factor failures never locked. | Fixed (`TestLimiterFloodKeepsThrottledKeys`, `TestAuthMFAAndSessions`) |
+| DNS rebinding between the clone-URL check and the fetch. | Fixed (`TestGitHonoursResolvePin`) |
+| Object-lock uploads without a checksum, which AWS rejects. | Fixed (`TestS3TargetRealObjectLock`) |
+| Package upgrades without a readiness gate; replaced generations not drained durably; a deploy failed permanently while egressd restarted. | Fixed (package `upgrade` job, `TestReplacedGenerationDrainedDurably`, `TestDecideRetriesWhileEgressdIsUnreachable`) |
+
+The full list, with severities, is in [docs/production-readiness.md](../docs/production-readiness.md).
+
 ## Externally owned items
 - A Phase 8 external penetration test before GA.
 - Offline TUF root key ceremony and custody.
