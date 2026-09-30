@@ -6,6 +6,24 @@ readiness pass found and fixed, and what still depends on things outside
 the repository. Its verdict is **release-candidate quality**. General
 availability waits on the items in [Before general availability](#before-general-availability).
 
+## Running the release gate anywhere
+
+`sudo scripts/release-gate.sh` runs, on any Linux host, everything the CI
+workflows below prove. Each stage reports PASS, FAIL or BLOCKED; a stage
+the host cannot run is reported as BLOCKED, never as passed. The stages are:
+lint, web, vulnerabilities, unit and integration (real MinIO), soak, e2e
+(real apps and Pebble), adversarial (gVisor, nftables), fuzz, the deb
+package and guest image, an installed systemd node, and upgrade/rollback.
+Only the Windows MSI, the macOS pkg, arm64 builds and the QEMU/KVM guest
+boot need other platforms (CI).
+
+For hosts behind a TLS-inspecting proxy, set `GATE_CA_BUNDLE`. For hosts
+without nested overlayfs, set `GATE_SNAPSHOTTER=native`.
+
+Latest full run: all 11 stages PASS, on an Ubuntu 24.04 cloud container
+behind a TLS-inspecting proxy with a cgroup v1 kernel. On that host the test
+node skips install.sh's cgroup v2 check, and says so in the log.
+
 ## What CI proves on every push
 
 Every workflow below is a release gate (`release.yml` calls it). CI sets
@@ -40,6 +58,8 @@ Each fix has a regression test that fails against the old code.
 | A package upgrade switched slots without checking the result, so a bad release left the node down. | Medium | Upgrades gate on the new `/readyz`, with the rollback rules described above. |
 | Old generations kept running forever if platformd restarted during the in-process drain delay. | Medium | The reconciler drains replaced generations durably. |
 | A deploy submitted while egressd was restarting failed permanently. | Low | It is retried, and still fails closed. |
+| Behind a TLS-inspecting proxy, Java builds (Maven, Gradle) failed even with `build.ca_bundle`: the JVM ignores `SSL_CERT_FILE`. | Medium | Generated steps import the extra CAs into a throwaway JDK trust store (`TestDockerBuildTrustsBuildCA`, e2e Java). |
+| With `build.ca_bundle` set, every untrusted (gVisor) build failed: the sandbox refused the CA, which is attached as a build secret, and its BuildKit could not pull through the proxy. | High (for proxied networks) | The CA bundle is the only secret allowed into the sandbox; real secrets are still refused (`TestUntrustedBuildSandbox`). |
 | An owner's MFA reset left security keys and recovery codes. Account-recovery actions left API tokens valid. Read-only tokens could revoke sessions. The remote-admin gate failed open on an unparsable client address. | Low–Medium | Fixed. |
 
 ## Before general availability
