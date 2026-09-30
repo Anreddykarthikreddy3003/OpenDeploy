@@ -93,6 +93,8 @@ Or copy PEM files into `/etc/opendeploy/ca.d/` yourself.
 - **Every service** trusts `/etc/ssl/certs` plus `/etc/opendeploy/ca.d` through `SSL_CERT_DIR`. That covers base-image pulls by rootless BuildKit, GitHub API calls, update checks and relay connections.
 - **Build steps** receive the merged bundle as the BuildKit secret `opendeploy-ca`.
   - Generated Dockerfiles mount it into every `RUN` step and point `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, `PIP_CERT`, `REQUESTS_CA_BUNDLE` and the like at it for that step only. It is never written into an image layer.
+  - Java tools (Maven, Gradle, sbt) ignore those variables. In images with a JDK, each generated step also imports the extra CAs (the secret `opendeploy-ca-extra`) into a copy of the JDK trust store on a tmpfs and sets `JAVA_TOOL_OPTIONS` for that step.
+  - Untrusted builds (the gVisor build sandbox) receive the bundle too. It is public trust material, the only "secret" allowed into the sandbox, and the sandboxed BuildKit uses it for its own base-image pulls.
   - Your own Dockerfiles opt in per step:
     ```dockerfile
     RUN --mount=type=secret,id=opendeploy-ca,target=/run/secrets/opendeploy-ca \

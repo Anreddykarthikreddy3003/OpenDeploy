@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/build/builder"
+	"github.com/anreddykarthikreddy3003/opendeploy/internal/build/detect"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/ids"
 	"github.com/anreddykarthikreddy3003/opendeploy/internal/network"
 )
@@ -39,7 +40,13 @@ func buildWith(t *testing.T, ex builder.Executor, dockerfile string, files map[s
 	dest := filepath.Join(dir, ids.New("dep"), "out.tar")
 	_ = os.MkdirAll(filepath.Dir(dest), 0o755)
 	var log bytes.Buffer
-	err := ex.Build(context.Background(), builder.Spec{ContextDir: ctxDir, DockerfileDir: dfDir, Dockerfile: "Dockerfile", Output: builder.OutputTar, Dest: dest}, &log)
+	spec := builder.Spec{ContextDir: ctxDir, DockerfileDir: dfDir, Dockerfile: "Dockerfile", Output: builder.OutputTar, Dest: dest}
+	// Behind a TLS-inspecting proxy, builds get the node's CA bundle the
+	// way builderd attaches it (build.ca_bundle).
+	if ca := os.Getenv("OPENDEPLOY_BUILD_CA_BUNDLE"); ca != "" {
+		spec.Secrets = map[string]string{detect.BuildCASecretID: ca, detect.BuildCAExtraSecretID: ca}
+	}
+	err := ex.Build(context.Background(), spec, &log)
 	if err != nil {
 		return log.String(), err
 	}
@@ -160,6 +167,15 @@ func TestUntrustedBuildSandbox(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(body), "gvisor") && !strings.Contains(body, "4.4.0") {
 		t.Fatalf("build did not run under gVisor: %q", body)
+	}
+	// A real secret never enters the sandbox (only the public CA bundle).
+	secret := filepath.Join(t.TempDir(), "token")
+	_ = os.WriteFile(secret, []byte("npm_supersecret"), 0o600)
+	var log bytes.Buffer
+	if err := ex.Build(context.Background(), builder.Spec{ContextDir: t.TempDir(), DockerfileDir: t.TempDir(), Dockerfile: "Dockerfile",
+		Output: builder.OutputTar, Dest: filepath.Join(t.TempDir(), "x", "out.tar"), Secrets: map[string]string{"NPM_TOKEN": secret}}, &log); err == nil ||
+		!strings.Contains(err.Error(), "never receive secrets") {
+		t.Fatalf("untrusted build accepted a secret: %v", err)
 	}
 	if o, _ := exec.Command("docker", "ps", "-a", "--filter", "label=org.opendeploy.managed=untrusted-build", "-q").Output(); len(bytes.TrimSpace(o)) != 0 {
 		t.Fatal("disposable build sandbox not removed")

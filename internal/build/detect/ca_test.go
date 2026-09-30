@@ -13,7 +13,9 @@ func TestWithBuildCA(t *testing.T) {
 		"COPY . .\n"
 	out := WithBuildCA(in)
 	lines := strings.Split(out, "\n")
-	mount := "--mount=type=secret,id=opendeploy-ca,target=/run/secrets/opendeploy-ca "
+	mount := "--mount=type=secret,id=opendeploy-ca,target=/run/secrets/opendeploy-ca " +
+		"--mount=type=secret,id=opendeploy-ca-extra,target=/run/secrets/opendeploy-ca-extra " +
+		"--mount=type=tmpfs,target=/run/opendeploy-jks "
 	if !strings.HasPrefix(lines[1], "RUN "+mount+"--mount=type=cache,target=/root/.npm export SSL_CERT_FILE=/run/secrets/opendeploy-ca") ||
 		!strings.HasSuffix(lines[1], "; npm ci && \\") {
 		t.Fatalf("shell RUN not rewritten: %q", lines[1])
@@ -36,12 +38,12 @@ func TestWithBuildCA(t *testing.T) {
 }
 
 // Every generated template must stay valid after the rewrite: each RUN line
-// gains exactly one secret mount.
+// gains exactly one mount of each CA secret.
 func TestWithBuildCAOnGeneratedPlans(t *testing.T) {
 	for _, df := range []string{renderCustom(&Plan{Port: 8080, StartCommand: "./app", BuildCommand: "make"}, "")} {
 		out := WithBuildCA(df)
 		for _, l := range strings.Split(out, "\n") {
-			if strings.HasPrefix(l, "RUN ") && !strings.HasPrefix(l, "RUN [") && strings.Count(l, "id=opendeploy-ca") != 1 {
+			if strings.HasPrefix(l, "RUN ") && !strings.HasPrefix(l, "RUN [") && (strings.Count(l, "id=opendeploy-ca,") != 1 || strings.Count(l, "id=opendeploy-ca-extra,") != 1) {
 				t.Fatalf("RUN line without exactly one CA mount: %q", l)
 			}
 		}

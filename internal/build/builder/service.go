@@ -416,9 +416,9 @@ func (s *Service) build(ctx context.Context, j *job, r Req, exec Executor, timeo
 			}
 			spec.BuildArgs["NO_PROXY"] = "localhost,127.0.0.1"
 		}
-		var caBundle string
+		var caBundle, caExtra string
 		if s.cfg.BuildCABundle != "" {
-			if caBundle, err = writeBuildCA(ws, s.cfg.BuildCABundle); err != nil {
+			if caBundle, caExtra, err = writeBuildCA(ws, s.cfg.BuildCABundle); err != nil {
 				return nil, err
 			}
 			if plan.Generated {
@@ -473,10 +473,13 @@ func (s *Service) build(ctx context.Context, j *job, r Req, exec Executor, timeo
 			if spec.Secrets == nil {
 				spec.Secrets = map[string]string{}
 			}
-			if _, clash := spec.Secrets[detect.BuildCASecretID]; clash {
-				return nil, fmt.Errorf("build secret name %q is reserved", detect.BuildCASecretID)
+			for _, id := range []string{detect.BuildCASecretID, detect.BuildCAExtraSecretID} {
+				if _, clash := spec.Secrets[id]; clash {
+					return nil, fmt.Errorf("build secret name %q is reserved", id)
+				}
 			}
 			spec.Secrets[detect.BuildCASecretID] = caBundle
+			spec.Secrets[detect.BuildCAExtraSecretID] = caExtra
 		}
 		fmt.Fprintf(lw, "==> building with %s (runtime %s)\n", exec.Name(), firstNonEmpty(r.BuildRuntime, "runc"))
 		if err := exec.Build(bctx, spec, lw); err != nil {
@@ -1011,14 +1014,15 @@ var systemRootFiles = []string{
 
 // writeBuildCA writes a complete trust bundle (host roots + the configured
 // extra CAs) into the build workspace: the toolchain variables that use it
-// replace their default roots, so it must contain both.
-func writeBuildCA(ws, extra string) (string, error) {
+// replace their default roots, so it must contain both. The extra CAs are
+// also written alone, for trust stores that are extended (Java).
+func writeBuildCA(ws, extra string) (bundle, extraOnly string, err error) {
 	add, err := os.ReadFile(extra)
 	if err != nil {
-		return "", fmt.Errorf("build CA bundle: %w", err)
+		return "", "", fmt.Errorf("build CA bundle: %w", err)
 	}
 	if !bytes.Contains(add, []byte("-----BEGIN CERTIFICATE-----")) {
-		return "", fmt.Errorf("build CA bundle %s contains no PEM certificates", extra)
+		return "", "", fmt.Errorf("build CA bundle %s contains no PEM certificates", extra)
 	}
 	var b bytes.Buffer
 	for _, f := range systemRootFiles {
@@ -1033,10 +1037,13 @@ func writeBuildCA(ws, extra string) (string, error) {
 	b.Write(add)
 	dir := filepath.Join(ws, "ca")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", err
+		return "", "", err
 	}
-	p := filepath.Join(dir, "bundle.pem")
-	return p, os.WriteFile(p, b.Bytes(), 0o600)
+	bundle, extraOnly = filepath.Join(dir, "bundle.pem"), filepath.Join(dir, "extra.pem")
+	if err := os.WriteFile(extraOnly, add, 0o600); err != nil {
+		return "", "", err
+	}
+	return bundle, extraOnly, os.WriteFile(bundle, b.Bytes(), 0o600)
 }
 
 // shareTree makes a hand-off directory readable by its group: builderd runs

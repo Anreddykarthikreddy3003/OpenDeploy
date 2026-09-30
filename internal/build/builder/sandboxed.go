@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/anreddykarthikreddy3003/opendeploy/internal/build/detect"
 )
 
 // SandboxedBuildKit runs each untrusted build in a disposable rootless
@@ -55,8 +57,13 @@ func (s *SandboxedBuildKit) Build(ctx context.Context, sp Spec, log io.Writer) e
 	if s.Runtime == "" || s.Image == "" {
 		return errors.New("sandboxed build executor not configured (fail closed)")
 	}
-	if len(sp.Secrets) > 0 {
-		return errors.New("untrusted builds never receive secrets")
+	// Untrusted builds never receive secrets. The node's build CA bundle is
+	// the one exception: it is public trust material builderd attaches to
+	// every build, not a user secret.
+	for id := range sp.Secrets {
+		if !publicBuildSecret(id) {
+			return errors.New("untrusted builds never receive secrets")
+		}
 	}
 	name := "od-ubk-" + strings.ToLower(filepath.Base(filepath.Dir(sp.Dest)))
 	netArg := "none"
@@ -85,9 +92,18 @@ func (s *SandboxedBuildKit) Build(ctx context.Context, sp Spec, log io.Writer) e
 		pr.CloseWithError(err)
 		return fmt.Errorf("copy build context: %w", err)
 	}
-	args := []string{"exec", "-e", "BUILDKITD_FLAGS=--oci-worker-no-process-sandbox", name, "buildctl-daemonless.sh", "build",
+	args := []string{"exec", "-e", "BUILDKITD_FLAGS=--oci-worker-no-process-sandbox"}
+	if _, ok := sp.Secrets[detect.BuildCASecretID]; ok {
+		// The sandboxed BuildKit pulls base images itself: behind a
+		// TLS-inspecting proxy it must trust the node's CA bundle too.
+		args = append(args, "-e", "SSL_CERT_FILE=/home/user/ca/"+detect.BuildCASecretID)
+	}
+	args = append(args, name, "buildctl-daemonless.sh", "build",
 		"--progress", "plain", "--frontend", "dockerfile.v0",
-		"--local", "context=/home/user/ctx", "--local", "dockerfile=/home/user/df"}
+		"--local", "context=/home/user/ctx", "--local", "dockerfile=/home/user/df")
+	for _, id := range sortedKeys(sp.Secrets) {
+		args = append(args, "--secret", "id="+id+",src=/home/user/ca/"+id)
+	}
 	if sp.Target != "" {
 		args = append(args, "--opt", "target="+sp.Target)
 	}
@@ -209,5 +225,31 @@ func writeBuildTar(w io.Writer, sp Spec) error {
 	if _, err := tw.Write(df); err != nil {
 		return err
 	}
+	if len(sp.Secrets) > 0 {
+		if err := tw.WriteHeader(&tar.Header{Name: "ca/", Typeflag: tar.TypeDir, Mode: 0o755, Uid: 1000, Gid: 1000}); err != nil {
+			return err
+		}
+		for _, id := range sortedKeys(sp.Secrets) {
+			if !publicBuildSecret(id) {
+				return fmt.Errorf("secret %q cannot enter a sandboxed build", id)
+			}
+			b, err := os.ReadFile(sp.Secrets[id])
+			if err != nil {
+				return err
+			}
+			if err := tw.WriteHeader(&tar.Header{Name: "ca/" + id, Mode: 0o644, Size: int64(len(b)), Uid: 1000, Gid: 1000}); err != nil {
+				return err
+			}
+			if _, err := tw.Write(b); err != nil {
+				return err
+			}
+		}
+	}
 	return tw.Close()
+}
+
+// publicBuildSecret reports the build "secrets" that are public trust
+// material (the node's CA bundle), allowed into untrusted builds.
+func publicBuildSecret(id string) bool {
+	return id == detect.BuildCASecretID || id == detect.BuildCAExtraSecretID
 }

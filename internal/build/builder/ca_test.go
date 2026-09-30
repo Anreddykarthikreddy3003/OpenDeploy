@@ -29,9 +29,12 @@ func TestWriteBuildCAMergesSystemRoots(t *testing.T) {
 	extra := filepath.Join(dir, "corp.pem")
 	caPEM, _, _ := testCA(t)
 	_ = os.WriteFile(extra, caPEM, 0o644)
-	p, err := writeBuildCA(dir, extra)
+	p, only, err := writeBuildCA(dir, extra)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(only); !bytes.Equal(b, caPEM) {
+		t.Fatal("extra-only bundle is not exactly the configured CAs")
 	}
 	b, _ := os.ReadFile(p)
 	if !bytes.HasSuffix(bytes.TrimSpace(b), bytes.TrimSpace(caPEM)) {
@@ -46,7 +49,7 @@ func TestWriteBuildCAMergesSystemRoots(t *testing.T) {
 		}
 	}
 	_ = os.WriteFile(extra, []byte("not a cert"), 0o644)
-	if _, err := writeBuildCA(dir, extra); err == nil {
+	if _, _, err := writeBuildCA(dir, extra); err == nil {
 		t.Fatal("non-PEM bundle accepted")
 	}
 }
@@ -110,7 +113,7 @@ func main(){r,err:=http.Get(os.Args[1]);if err!=nil{fmt.Fprintln(os.Stderr,err);
 	}
 	extra := filepath.Join(t.TempDir(), "corp.pem")
 	_ = os.WriteFile(extra, caPEM, 0o644)
-	bundle, err := writeBuildCA(t.TempDir(), extra)
+	bundle, extraOnly, err := writeBuildCA(t.TempDir(), extra)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,9 +134,29 @@ func main(){r,err:=http.Get(os.Args[1]);if err!=nil{fmt.Fprintln(os.Stderr,err);
 	} else if !strings.Contains(logs, "certificate") {
 		t.Fatalf("failed for another reason: %v\n%s", err, logs)
 	}
+	secrets := map[string]string{detect.BuildCASecretID: bundle, detect.BuildCAExtraSecretID: extraOnly}
 	df := detect.WithBuildCA(base)
-	if logs, err := try(df, map[string]string{detect.BuildCASecretID: bundle}); err != nil {
+	if logs, err := try(df, secrets); err != nil {
 		t.Fatalf("build with the CA failed: %v\n%s", err, logs)
+	}
+	// JVM tools ignore the SSL_CERT_FILE family: the step must import the
+	// CA into a throwaway trust store (Maven/Gradle behind a TLS proxy).
+	_ = os.WriteFile(filepath.Join(ctxDir, "Fetch.java"), []byte(`public class Fetch {
+	public static void main(String[] a) throws Exception {
+		var r = java.net.http.HttpClient.newHttpClient().send(java.net.http.HttpRequest.newBuilder(java.net.URI.create(a[0])).build(),
+			java.net.http.HttpResponse.BodyHandlers.ofString());
+		System.out.println("status " + r.statusCode());
+	}
+}
+`), 0o644)
+	jbase := "FROM eclipse-temurin:21-jdk\nCOPY Fetch.java /Fetch.java\nRUN java /Fetch.java " + url + "\n"
+	if logs, err := try(jbase+"# plain\n", nil); err == nil {
+		t.Fatalf("Java fetch through the inspecting server succeeded without the CA:\n%s", logs)
+	} else if !strings.Contains(logs, "PKIX") && !strings.Contains(logs, "certification path") {
+		t.Fatalf("Java failed for another reason: %v\n%s", err, logs)
+	}
+	if logs, err := try(detect.WithBuildCA(jbase), secrets); err != nil || !strings.Contains(logs, "status 200") {
+		t.Fatalf("Java build with the CA failed: %v\n%s", err, logs)
 	}
 }
 

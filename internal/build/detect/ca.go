@@ -17,7 +17,24 @@ import (
 const (
 	BuildCASecretID = "opendeploy-ca"
 	BuildCAPath     = "/run/secrets/opendeploy-ca"
+	// BuildCAExtraSecretID carries only the operator's extra CAs, for
+	// toolchains that extend a trust store instead of replacing it (Java).
+	BuildCAExtraSecretID = "opendeploy-ca-extra"
+	BuildCAExtraPath     = "/run/secrets/opendeploy-ca-extra"
+	buildCAJavaDir       = "/run/opendeploy-jks"
 )
+
+// javaTrust makes JVM tools (Maven, Gradle, sbt) trust the extra CAs: the
+// JVM ignores the variables above, so the step imports them into a copy of
+// the JDK's default trust store on a tmpfs and points JAVA_TOOL_OPTIONS at
+// it. It is a no-op in images without a JDK.
+const javaTrust = `if command -v keytool >/dev/null 2>&1; then ` +
+	`od_jh=$(dirname "$(dirname "$(readlink -f "$(command -v keytool)")")"); ` +
+	`cp "$od_jh/lib/security/cacerts" ` + buildCAJavaDir + `/cacerts && ` +
+	`awk '/BEGIN CERTIFICATE/{n++} n{print > ("` + buildCAJavaDir + `/ca" n ".pem")}' ` + BuildCAExtraPath + ` && ` +
+	`for od_f in ` + buildCAJavaDir + `/ca*.pem; do keytool -importcert -noprompt -storepass changeit -keystore ` + buildCAJavaDir + `/cacerts ` +
+	`-alias "opendeploy-$(basename "$od_f" .pem)" -file "$od_f" >/dev/null; done; ` +
+	`export JAVA_TOOL_OPTIONS="-Djavax.net.ssl.trustStore=` + buildCAJavaDir + `/cacerts -Djavax.net.ssl.trustStorePassword=changeit ${JAVA_TOOL_OPTIONS:-}"; fi; `
 
 // buildCAEnv are the variables that make common toolchains trust the bundle.
 // All of them take a complete bundle (they replace, not extend, the default
@@ -48,7 +65,10 @@ func WithBuildCA(dockerfile string) string {
 		exports.WriteString(" " + v + "=" + BuildCAPath)
 	}
 	exports.WriteString("; ")
-	mount := "--mount=type=secret,id=" + BuildCASecretID + ",target=" + BuildCAPath + " "
+	exports.WriteString(javaTrust)
+	mount := "--mount=type=secret,id=" + BuildCASecretID + ",target=" + BuildCAPath + " " +
+		"--mount=type=secret,id=" + BuildCAExtraSecretID + ",target=" + BuildCAExtraPath + " " +
+		"--mount=type=tmpfs,target=" + buildCAJavaDir + " "
 
 	lines := strings.Split(dockerfile, "\n")
 	continued := false

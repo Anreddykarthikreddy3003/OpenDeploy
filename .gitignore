@@ -11,3 +11,4 @@ coverage.*
 /web/*.tsbuildinfo
 /opendeployctl
 /opendeployctl.exe
+.gate/
