@@ -79,7 +79,11 @@ and the documentation for each.
 3. **Physical desktops.** Install once on Windows (WSL2) and once on a Mac
    (Virtualization.framework). Hosted CI runners cannot run nested
    virtualization, so there the desktop packages only prove that they
-   install and report their status.
+   install and report their status. Follow the
+   [physical test plan](physical-test-plan.md); the results go in
+   [test-reports](test-reports/).
+   - Windows: not yet run.
+   - macOS: not yet run.
 4. **External penetration test** (PRD Phase 8), scoped to the API,
    authentication, the build sandbox, the relay and the domain flow.
    Record the findings in the [security register](../security/register.md).

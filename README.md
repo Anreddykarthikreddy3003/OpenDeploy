@@ -31,6 +31,7 @@ OpenDeploy is built on the assumption that the code it runs may be hostile.
 | [Operations](docs/operations.md) | Deployments, backups, updates, domains, diagnostics |
 | [Runbooks](docs/runbooks.md) | Compromise response, degraded mode, restore, lost MFA |
 | [Relay](docs/relay.md) | Running and enrolling an OpenDeploy relay |
+| [Physical test plan](docs/physical-test-plan.md) | Testing on a real Windows or Mac machine; [the prompt](docs/physical-test-prompt.md) for Claude Code there |
 | [Security register](security/register.md) | Every threat question (Q1–Q80) and control (SC-01–SC-24), with the test that proves it |
 | [Threat model](security/threat-model.md) | |
 | [Product requirements](docs/PRD.md) | |
