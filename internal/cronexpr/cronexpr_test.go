@@ -67,3 +67,14 @@ func FuzzParse(f *testing.F) {
 		}
 	})
 }
+
+func TestParseRejectsOversizedSteps(t *testing.T) {
+	for _, s := range []string{"*/61 * * * *", "1/9223372036854775807 * * * *", "* */25 * * *"} {
+		if _, err := Parse(s); err == nil {
+			t.Errorf("%q accepted", s)
+		}
+	}
+	if _, err := Parse("*/60 * * * *"); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -58,7 +58,7 @@ func parseField(f string, lo, hi int) (uint64, error) {
 		if base, st, ok := strings.Cut(part, "/"); ok {
 			hasStep = true
 			n, err := strconv.Atoi(st)
-			if err != nil || n <= 0 {
+			if err != nil || n <= 0 || n > hi-lo+1 { // a larger step would overflow the loop below
 				return 0, fmt.Errorf("cron: bad step %q", part)
 			}
 			step, part = n, base

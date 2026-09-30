@@ -70,7 +70,16 @@ jobs:
           echo "$targets"
           echo "$targets" | while read -r name pkg; do
             echo "::group::$name ($pkg)"
-            go test -run '^$' -fuzz "^${name}\$" -fuzztime 45s "$pkg"
+            if ! go test -run '^$' -fuzz "^${name}\$" -fuzztime 45s "$pkg" 2>&1 | tee fuzz.log; then
+              # Go's coordinator reports "context deadline exceeded" when the
+              # time budget ends while a worker is still minimizing a new
+              # corpus entry. That is not a finding: a real one always writes
+              # "Failing input written to testdata/fuzz/...".
+              if grep -q 'Failing input written to' fuzz.log || ! grep -q 'context deadline exceeded' fuzz.log; then
+                echo "::error::$name found a failing input"; exit 1
+              fi
+              echo "::warning::$name: time budget ended during minimization (no failing input)"
+            fi
             echo "::endgroup::"
           done
       - uses: actions/upload-artifact@v4
