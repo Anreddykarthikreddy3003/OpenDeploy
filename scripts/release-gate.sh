@@ -166,10 +166,22 @@ R=/usr/lib/opendeploy/release
 node_up() {
 	docker rm -f $NODE >/dev/null 2>&1 || true
 	docker import dist/guest/wsl2-amd64/opendeploy.wsl od-gate-node:latest >/dev/null
-	docker run -d --name $NODE --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
+	docker create --name $NODE --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
 		--tmpfs /run --tmpfs /run/lock --tmpfs /tmp od-gate-node:latest /sbin/init >/dev/null
+	# The gate installs the release itself, so mask the image's first-boot
+	# setup before systemd starts: stopping it after boot races with it, and
+	# on a fast host it has installed the release before the gate can.
+	mask=$(mktemp -d)
+	mkdir -p "$mask/etc/systemd/system"
+	ln -s /dev/null "$mask/etc/systemd/system/opendeploy-guest-setup.service"
+	tar -C "$mask" -cf - etc | docker cp - $NODE:/
+	rm -rf "$mask"
+	docker start $NODE >/dev/null
 	sleep 3
-	docker exec $NODE sh -c 'systemctl stop opendeploy-guest-setup.service; systemctl disable opendeploy-guest-setup.service; chmod 666 /dev/net/tun'
+	docker exec $NODE chmod 666 /dev/net/tun
+	if docker exec $NODE test -e /opt/opendeploy/slots/current; then
+		echo "a release was installed on the test node before the gate installed one"; exit 1
+	fi
 	go test -tags pkginstall -c -o "$OUT/pkg.test" ./tests/package/
 	docker exec $NODE mkdir -p /root/tests/package /root/tests/e2e
 	docker cp tests/e2e/fixtures $NODE:/root/tests/e2e/
