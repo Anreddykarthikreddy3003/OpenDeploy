@@ -73,9 +73,9 @@ This stops the services. Node data in `/var/lib/opendeploy` and `/etc/opendeploy
 - Virtualization enabled in firmware.
 
 **Install:** run `OpenDeploy-<version>-x64.msi` as an administrator. The installer:
-- copies `opendeploy-desktop.exe`, `opendeployctl.exe` and the OpenDeploy WSL image to `C:\Program Files\OpenDeploy`;
-- creates the local service account `opendeploy-svc` (hidden, random password, "log on as a service" only);
-- registers and starts the **OpenDeploy** Windows service. It starts at boot without anyone logging in.
+- copies `opendeploy-desktop.exe` and `opendeployctl.exe` to `C:\Program Files\OpenDeploy\bin` (added to the system PATH), and the OpenDeploy WSL image to `C:\Program Files\OpenDeploy\guest`;
+- creates the local service account `opendeploy-svc`: a standard user (not an administrator), hidden from the sign-in screen, with the "log on as a service" right and a random password that is never stored;
+- registers and starts the **OpenDeploy** Windows service (automatic, delayed start). It starts at boot without anyone logging in.
 
 **First start** imports the WSL distribution into `C:\ProgramData\OpenDeploy\wsl` and boots the node, which takes a few minutes. Follow it from an elevated prompt:
 ```
@@ -83,7 +83,7 @@ opendeploy-desktop status
 ```
 Once it reports `running`, the command prints the bootstrap token. Then open http://127.0.0.1:8080. Apps are served at `http://<project>.localhost`.
 
-**Isolation:** the distribution has Windows interop, drive automounts and PATH sharing disabled, so workloads cannot reach Windows through WSL. Node data lives in the distribution's virtual disk, which only the service account and Administrators can access.
+**Isolation:** the distribution has Windows interop, drive automounts and PATH sharing disabled, so workloads cannot reach Windows through WSL. Node data lives in the distribution's virtual disk under `C:\ProgramData\OpenDeploy`, which only SYSTEM, Administrators and the service account can access.
 
 **Uninstall:** use Apps & features. This removes the service and keeps the node data. To delete everything, first run this as administrator:
 ```
