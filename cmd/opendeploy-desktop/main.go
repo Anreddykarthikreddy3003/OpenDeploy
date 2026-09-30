@@ -4,7 +4,7 @@
 // login, keeps it healthy, and exposes the dashboard on 127.0.0.1:8080 and
 // the app edge on ports 80/443 of the host loopback.
 //
-//	opendeploy-desktop install     register and start the system service (admin)
+//	opendeploy-desktop install     register and start the system service (admin) [--data DIR on Windows]
 //	opendeploy-desktop uninstall   stop and remove the service [--purge: delete the node's data]
 //	opendeploy-desktop start|stop  control the service
 //	opendeploy-desktop status      data plane state and, before the owner exists, the bootstrap token
@@ -37,7 +37,7 @@ func usage() {
   uninstall   stop and remove the service; --purge also deletes the node and all its data
   start       start the service
   stop        stop the service (and the data plane)
-  status      show the data plane state
+  status      show the data folder and the data plane state
   run         run the supervisor in the foreground
   version     print the version
 `)
@@ -49,18 +49,25 @@ func main() {
 		os.Exit(2)
 	}
 	cmd, args := os.Args[1], os.Args[2:]
-	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
 	cfg := defaultConfig()
-	fs.StringVar(&cfg.ImageDir, "images", cfg.ImageDir, "guest image directory")
-	fs.StringVar(&cfg.DataDir, "data", cfg.DataDir, "host data directory")
-	fs.IntVar(&cfg.CPUs, "cpus", 0, "guest CPUs (VM only; default 4)")
-	fs.IntVar(&cfg.MemoryMiB, "memory", 0, "guest memory in MiB (VM only; default 6144)")
-	fs.IntVar(&cfg.DiskGiB, "disk", 0, "guest disk size in GiB (VM only, first start; default 64)")
-	purge := fs.Bool("purge", false, "uninstall: also delete the node and all of its data")
+	fs, purge := flagSet(cmd, &cfg, flag.ExitOnError)
 	_ = fs.Parse(args)
-	cfg.Defaults()
+	dataSet := false
+	fs.Visit(func(f *flag.Flag) { dataSet = dataSet || f.Name == "data" })
 
 	var err error
+	switch cmd {
+	case "install", "uninstall", "status":
+		// The service runs with an explicit --data; the commands that manage
+		// it follow the data folder chosen at install time.
+		err = resolveDataDir(cmd, &cfg, dataSet)
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+	cfg.Defaults()
+
 	switch cmd {
 	case "run":
 		err = run(cfg)
@@ -86,6 +93,20 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
+}
+
+// flagSet defines the command-line flags, writing into cfg. The Windows host
+// also parses the installed service's own arguments with it, so the data
+// folder is read exactly as the service's `run` reads it.
+func flagSet(cmd string, cfg *desktop.Config, onError flag.ErrorHandling) (*flag.FlagSet, *bool) {
+	fs := flag.NewFlagSet(cmd, onError)
+	fs.StringVar(&cfg.ImageDir, "images", cfg.ImageDir, "guest image directory")
+	fs.StringVar(&cfg.DataDir, "data", cfg.DataDir, "host data directory (install: where the node's data lives)")
+	fs.IntVar(&cfg.CPUs, "cpus", 0, "guest CPUs (VM only; default 4)")
+	fs.IntVar(&cfg.MemoryMiB, "memory", 0, "guest memory in MiB (VM only; default 6144)")
+	fs.IntVar(&cfg.DiskGiB, "disk", 0, "guest disk size in GiB (VM only, first start; default 64)")
+	purge := fs.Bool("purge", false, "uninstall: also delete the node and all of its data")
+	return fs, purge
 }
 
 // logger writes to <data>/desktop.log (and stderr when interactive).
@@ -126,6 +147,7 @@ func runForeground(cfg desktop.Config, interactive bool) error {
 }
 
 func status(cfg desktop.Config) error {
+	fmt.Printf("Data folder: %s\n", cfg.DataDir)
 	st, err := desktop.ReadStatus(cfg.DataDir)
 	if errors.Is(err, os.ErrNotExist) {
 		fmt.Println("OpenDeploy is not running (no status yet). Start it with: opendeploy-desktop start")

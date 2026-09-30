@@ -264,6 +264,21 @@ func installService(cfg desktop.Config) error {
 	if _, err := os.Stat(filepath.Join(cfg.ImageDir, "opendeploy.wsl")); err != nil {
 		return fmt.Errorf("guest image missing: %w", err)
 	}
+	// Check the data folder before changing anything. resolveDataDir already
+	// made it the existing node's folder, or refused a different one.
+	def := defaultDataDir()
+	home, err := existingHome(def)
+	if err != nil {
+		return err
+	}
+	ours := samePath(cfg.DataDir, home.Dir) || samePath(cfg.DataDir, def)
+	if err := validateDataDir(cfg.DataDir, hostSystemDirs(), ours); err != nil {
+		return fmt.Errorf("data folder: %w", err)
+	}
+	if err := volumeOf(cfg.DataDir); err != nil {
+		return fmt.Errorf("data folder %s: %w", cfg.DataDir, err)
+	}
+	fmt.Printf("Node data folder: %s\n", cfg.DataDir)
 	m, err := mgr.Connect()
 	if err != nil {
 		return fmt.Errorf("%w (run from an elevated prompt)", err)
@@ -276,6 +291,9 @@ func installService(cfg desktop.Config) error {
 	if err := secureDataDir(cfg.DataDir); err != nil {
 		return fmt.Errorf("secure %s: %w", cfg.DataDir, err)
 	}
+	if err := writeMarker(cfg.DataDir); err != nil {
+		return fmt.Errorf("mark %s as the OpenDeploy data folder: %w", cfg.DataDir, err)
+	}
 	c := mgr.Config{
 		DisplayName:      "OpenDeploy",
 		Description:      "Runs the OpenDeploy data plane (managed WSL2 distribution) and serves the dashboard on http://127.0.0.1:8080.",
@@ -287,7 +305,8 @@ func installService(cfg desktop.Config) error {
 	args := []string{"run", "--images", cfg.ImageDir, "--data", cfg.DataDir}
 	s, err := m.OpenService(serviceName)
 	if err == nil {
-		// Upgrade: refresh binary path, account password and arguments.
+		// Upgrade: refresh binary path, account password and arguments. The
+		// data folder is the service's own (resolveDataDir), so it is kept.
 		defer s.Close()
 		_, _ = s.Control(svc.Stop)
 		waitState(s, svc.Stopped, time.Minute)
@@ -311,6 +330,10 @@ func installService(cfg desktop.Config) error {
 	actions := []mgr.RecoveryAction{{Type: mgr.ServiceRestart, Delay: serviceRestartDelay}, {Type: mgr.ServiceRestart, Delay: serviceRestartDelay}, {Type: mgr.ServiceRestart, Delay: time.Minute}}
 	if err := s.SetRecoveryActions(actions, serviceFailureResetSecs); err != nil {
 		return err
+	}
+	// Remembered for a reinstall after an uninstall that keeps the data.
+	if err := recordDataDir(cfg.DataDir); err != nil {
+		return fmt.Errorf(`record the data folder in HKLM\%s: %w`, dataRegKey, err)
 	}
 	if err := s.Start(); err != nil {
 		return err
@@ -339,6 +362,13 @@ func waitState(s *mgr.Service, want svc.State, timeout time.Duration) {
 }
 
 func uninstallService(cfg desktop.Config, purge bool) error {
+	def, sys := defaultDataDir(), hostSystemDirs()
+	if purge {
+		// Refuse before removing anything if the folder is not ours to delete.
+		if err := checkPurge(cfg.DataDir, def, sys); err != nil {
+			return err
+		}
+	}
 	m, err := mgr.Connect()
 	if err != nil {
 		return fmt.Errorf("%w (run from an elevated prompt)", err)
@@ -367,10 +397,11 @@ func uninstallService(cfg desktop.Config, purge bool) error {
 		_ = k.DeleteValue(serviceAccount)
 		k.Close()
 	}
-	if err := os.RemoveAll(cfg.DataDir); err != nil {
+	if err := purgeDataDir(cfg.DataDir, def, sys); err != nil {
 		return err
 	}
-	fmt.Println("Removed the OpenDeploy service, its account and all node data.")
+	forgetDataDir()
+	fmt.Printf("Removed the OpenDeploy service, its account and all node data (%s).\n", cfg.DataDir)
 	return nil
 }
 

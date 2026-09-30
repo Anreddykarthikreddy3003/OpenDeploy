@@ -8,8 +8,17 @@
   Installs opendeploy-desktop and opendeployctl under Program Files and the
   managed WSL distribution image, then registers the OpenDeploy Windows
   service (dedicated service account, starts at boot without a user login).
-  Uninstall removes the service; node data in %ProgramData%\OpenDeploy is
-  kept unless `opendeploy-desktop uninstall -purge` is run first.
+
+  Public properties:
+    INSTALLFOLDER  program files (default C:\Program Files\OpenDeploy)
+    DATADIR        the node's data: WSL disk, status, logs (default
+                   %ProgramData%\OpenDeploy). Only for a first install:
+                   upgrades and repairs keep the folder the service already
+                   uses, and a different DATADIR is refused.
+    e.g. msiexec /i OpenDeploy-x64.msi DATADIR=A:\OpenDeploy
+
+  Uninstall removes the service; the node data is kept unless
+  `opendeploy-desktop uninstall -purge` is run first.
   Sign the MSI and binaries with Authenticode before distribution.
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
@@ -21,6 +30,18 @@
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
 
     <Launch Condition="Installed OR VersionNT64 &gt;= 603" Message="OpenDeploy requires 64-bit Windows 10 or later with WSL 2." />
+
+    <!-- The data folder. opendeploy-desktop validates it and keeps the source
+         of truth (the service's own arguments); KEPTDATADIR is the folder the
+         last install recorded, read here only to refuse a move early with a
+         readable message. -->
+    <Property Id="DATADIR" Secure="yes" />
+    <Property Id="KEPTDATADIR">
+      <RegistrySearch Id="KeptDataDir" Root="HKLM" Key="SOFTWARE\OpenDeploy" Name="DataDir" Type="raw" Bitness="always64" />
+    </Property>
+    <SetProperty Id="KEPTDATADIRSLASH" Value="[KEPTDATADIR]\" After="AppSearch" Sequence="both" Condition="KEPTDATADIR" />
+    <Launch Condition="Installed OR NOT DATADIR OR NOT KEPTDATADIR OR DATADIR ~= KEPTDATADIR OR DATADIR ~= KEPTDATADIRSLASH"
+            Message="OpenDeploy already keeps its node data in [KEPTDATADIR]. Moving it to [DATADIR] is not supported. Install without DATADIR to keep the current folder, or first delete the node and all of its data with: opendeploy-desktop uninstall --purge" />
 
     <StandardDirectory Id="System64Folder" />
     <StandardDirectory Id="ProgramFiles64Folder">
@@ -50,13 +71,18 @@
 
     <CustomAction Id="StopForUpgrade" Directory="System64Folder" ExeCommand="&quot;[System64Folder]net.exe&quot; stop OpenDeploy"
                   Execute="deferred" Impersonate="no" Return="ignore" />
+    <!-- Without DATADIR, `install` follows the installed service's data folder
+         (or the default). The space before the closing quote keeps a trailing
+         backslash in DATADIR from escaping the quote; install trims it. -->
     <CustomAction Id="InstallService" FileRef="DesktopExeFile" ExeCommand="install" Execute="deferred" Impersonate="no" Return="check" />
+    <CustomAction Id="InstallServiceDataDir" FileRef="DesktopExeFile" ExeCommand="install --data &quot;[DATADIR] &quot;" Execute="deferred" Impersonate="no" Return="check" />
     <CustomAction Id="UninstallService" FileRef="DesktopExeFile" ExeCommand="uninstall" Execute="deferred" Impersonate="no" Return="ignore" />
 
     <InstallExecuteSequence>
       <Custom Action="StopForUpgrade" Before="RemoveExistingProducts" Condition="WIX_UPGRADE_DETECTED" />
       <Custom Action="UninstallService" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
-      <Custom Action="InstallService" Before="InstallFinalize" Condition="NOT REMOVE" />
+      <Custom Action="InstallService" Before="InstallFinalize" Condition="NOT REMOVE AND NOT DATADIR" />
+      <Custom Action="InstallServiceDataDir" Before="InstallFinalize" Condition="NOT REMOVE AND DATADIR" />
     </InstallExecuteSequence>
   </Package>
 </Wix>

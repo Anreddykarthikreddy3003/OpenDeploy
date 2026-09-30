@@ -77,18 +77,28 @@ This stops the services. Node data in `/var/lib/opendeploy` and `/etc/opendeploy
 - creates the local service account `opendeploy-svc`: a standard user (not an administrator), hidden from the sign-in screen, with the "log on as a service" right and a random password that is never stored;
 - registers and starts the **OpenDeploy** Windows service (automatic, delayed start). It starts at boot without anyone logging in.
 
-**First start** imports the WSL distribution into `C:\ProgramData\OpenDeploy\wsl` and boots the node, which takes a few minutes. Follow it from an elevated prompt:
+**Data folder:** the node's data (its WSL disk, status and logs) goes in `C:\ProgramData\OpenDeploy` unless you choose another folder at the first install, from an administrator prompt:
+```
+msiexec /i OpenDeploy-<version>-x64.msi DATADIR=A:\OpenDeploy
+```
+- The folder must be a full path on a local NTFS (or ReFS) drive, and new or empty. A drive root (`A:\`), a network path, and the Windows, Program Files and user profile folders are refused. The installer marks the folder with a `.opendeploy-data` file.
+- You choose it once. Upgrades, repairs, `status` and `uninstall` use the folder the service was installed with; you don't pass it again. The folder is also recorded in the registry (`HKLM\SOFTWARE\OpenDeploy`, value `DataDir`), so a reinstall after an uninstall that kept the data finds it.
+- The data can't be moved. Installing with a different `DATADIR`, or `opendeploy-desktop install --data <other folder>`, is refused. To move a node, delete it with `opendeploy-desktop uninstall --purge` (this deletes all of its data) and install again.
+- The program files go to `C:\Program Files\OpenDeploy`. Add `INSTALLFOLDER=D:\Apps\OpenDeploy` to put them elsewhere.
+
+**First start** imports the WSL distribution into the `wsl` folder inside the data folder and boots the node, which takes a few minutes. Follow it from an elevated prompt:
 ```
 opendeploy-desktop status
 ```
-Once it reports `running`, the command prints the bootstrap token. Then open http://127.0.0.1:8080. Apps are served at `http://<project>.localhost`.
+The first line is the data folder, for example `Data folder: A:\OpenDeploy`. Once it reports `running`, the command prints the bootstrap token. Then open http://127.0.0.1:8080. Apps are served at `http://<project>.localhost`.
 
-**Isolation:** the distribution has Windows interop, drive automounts and PATH sharing disabled, so workloads cannot reach Windows through WSL. Node data lives in the distribution's virtual disk under `C:\ProgramData\OpenDeploy`, which only SYSTEM, Administrators and the service account can access.
+**Isolation:** the distribution has Windows interop, drive automounts and PATH sharing disabled, so workloads cannot reach Windows through WSL. Node data lives in the distribution's virtual disk in the data folder, which only SYSTEM, Administrators and the service account can access.
 
-**Uninstall:** use Apps & features. This removes the service and keeps the node data. To delete everything, first run this as administrator:
+**Uninstall:** use Apps & features. This removes the service and keeps the node data; installing again picks it up. To delete everything, first run this as administrator:
 ```
 opendeploy-desktop uninstall --purge
 ```
+It deletes the service account and the data folder the node was installed with. It deletes the folder only if it holds the `.opendeploy-data` marker (or is the default `C:\ProgramData\OpenDeploy`); otherwise it stops and changes nothing.
 
 ## macOS 13+ (Apple silicon and Intel)
 

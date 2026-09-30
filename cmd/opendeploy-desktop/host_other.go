@@ -17,6 +17,7 @@ func defaultConfig() desktop.Config {
 	return desktop.Config{ImageDir: "/usr/lib/opendeploy/guest", DataDir: filepath.Join(os.TempDir(), "opendeploy-desktop")}
 }
 
+func resolveDataDir(string, *desktop.Config, bool) error           { return nil }
 func newGuest(desktop.Config, *slog.Logger) (desktop.Guest, error) { return nil, errLinux }
 func run(desktop.Config) error                                     { return errLinux }
 func installService(desktop.Config) error                          { return errLinux }

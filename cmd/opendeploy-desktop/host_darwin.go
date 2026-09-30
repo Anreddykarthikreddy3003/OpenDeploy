@@ -29,6 +29,10 @@ func defaultConfig() desktop.Config {
 	}
 }
 
+// resolveDataDir is a no-op on macOS: the data folder is the --data flag or
+// the default, as before.
+func resolveDataDir(string, *desktop.Config, bool) error { return nil }
+
 func newGuest(cfg desktop.Config, log *slog.Logger) (desktop.Guest, error) {
 	return &desktop.VZ{Config: cfg, Log: log}, nil
 }
