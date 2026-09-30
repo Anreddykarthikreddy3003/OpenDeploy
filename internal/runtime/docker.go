@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -57,6 +58,107 @@ type Docker struct {
 	SecretsDir string // host tmpfs dir for secret files
 	VolumesDir string
 	Runsc      string // docker runtime name for gVisor ("runsc")
+
+	verMu  sync.Mutex
+	apiVer apiVersion // negotiated with the engine on first use; zero until then
+}
+
+// The Engine API versions this client speaks. Every request body and every
+// response field docker.go uses was checked against the Engine API version
+// history for each version in this range, so each of them means the same
+// thing at any version in it. 1.43 is Docker 24 (the version this client was
+// written against); 1.52 is Docker 29. Raise the maximum only after
+// repeating that check for the new versions.
+var (
+	dockerMinAPIVersion = apiVersion{1, 43}
+	dockerMaxAPIVersion = apiVersion{1, 52}
+)
+
+// apiVersion is a Docker Engine API version ("1.52").
+type apiVersion struct{ major, minor int }
+
+func (v apiVersion) String() string { return fmt.Sprintf("%d.%d", v.major, v.minor) }
+
+func (v apiVersion) less(o apiVersion) bool {
+	return v.major < o.major || (v.major == o.major && v.minor < o.minor)
+}
+
+func parseAPIVersion(s string) (apiVersion, bool) {
+	a, b, ok := strings.Cut(s, ".")
+	if !ok {
+		return apiVersion{}, false
+	}
+	major, err1 := strconv.Atoi(a)
+	minor, err2 := strconv.Atoi(b)
+	if err1 != nil || err2 != nil || major < 1 || minor < 0 {
+		return apiVersion{}, false
+	}
+	return apiVersion{major, minor}, true
+}
+
+// negotiateAPIVersion picks the API version to use with an engine that
+// reports ApiVersion server and MinAPIVersion serverMin in GET /version, the
+// way the Docker CLI does: the lower of the engine's version and the
+// client's maximum, provided the engine still accepts it.
+func negotiateAPIVersion(server, serverMin string) (apiVersion, error) {
+	sv, ok := parseAPIVersion(server)
+	if !ok {
+		return apiVersion{}, fmt.Errorf("docker: engine reported an invalid API version %q", server)
+	}
+	v := sv
+	if dockerMaxAPIVersion.less(v) {
+		v = dockerMaxAPIVersion
+	}
+	if serverMin != "" {
+		mv, ok := parseAPIVersion(serverMin)
+		if !ok {
+			return apiVersion{}, fmt.Errorf("docker: engine reported an invalid minimum API version %q", serverMin)
+		}
+		if v.less(mv) {
+			return apiVersion{}, fmt.Errorf("docker: engine requires API version %s or newer, but OpenDeploy supports at most %s; use an older Docker Engine or a newer OpenDeploy", mv, dockerMaxAPIVersion)
+		}
+	}
+	if v.less(dockerMinAPIVersion) {
+		return apiVersion{}, fmt.Errorf("docker: engine API version %s is older than %s, the oldest OpenDeploy supports; upgrade Docker Engine to 24.0 or newer", sv, dockerMinAPIVersion)
+	}
+	return v, nil
+}
+
+// apiVersion returns the negotiated API version, asking the engine once per
+// client. A failed negotiation is not cached, so an engine that was not up
+// yet is asked again on the next request.
+func (d *Docker) apiVersion(ctx context.Context) (apiVersion, error) {
+	d.verMu.Lock()
+	defer d.verMu.Unlock()
+	if d.apiVer != (apiVersion{}) {
+		return d.apiVer, nil
+	}
+	// GET /version is served unversioned by every engine.
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker/version", nil)
+	if err != nil {
+		return apiVersion{}, err
+	}
+	resp, err := d.hc.Do(req)
+	if err != nil {
+		return apiVersion{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return apiVersion{}, readAPIError(resp)
+	}
+	var info struct {
+		APIVersion    string `json:"ApiVersion"`
+		MinAPIVersion string `json:"MinAPIVersion"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&info); err != nil {
+		return apiVersion{}, fmt.Errorf("docker: GET /version: %w", err)
+	}
+	v, err := negotiateAPIVersion(info.APIVersion, info.MinAPIVersion)
+	if err != nil {
+		return apiVersion{}, err
+	}
+	d.apiVer = v
+	return v, nil
 }
 
 // NewDocker connects to a Docker Engine socket (unix:///var/run/docker.sock).
@@ -82,6 +184,48 @@ type apiError struct {
 
 func (e *apiError) Error() string { return fmt.Sprintf("docker: %d %s", e.Status, e.Message) }
 
+// do sends one request to the engine at the negotiated API version; every
+// Engine API request goes through here. A non-2xx response is returned as an
+// *apiError; otherwise the caller closes the body.
+func (d *Docker) do(ctx context.Context, method, p string, q url.Values, body io.Reader, hdr http.Header) (*http.Response, error) {
+	ver, err := d.apiVersion(ctx)
+	if err != nil {
+		return nil, err
+	}
+	u := "http://docker/v" + ver.String() + p
+	if len(q) > 0 {
+		u += "?" + q.Encode()
+	}
+	req, err := http.NewRequestWithContext(ctx, method, u, body)
+	if err != nil {
+		return nil, err
+	}
+	for k, v := range hdr {
+		req.Header[k] = v
+	}
+	resp, err := d.hc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode/100 != 2 {
+		defer resp.Body.Close()
+		return nil, readAPIError(resp)
+	}
+	return resp, nil
+}
+
+func readAPIError(resp *http.Response) error {
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	var m struct {
+		Message string `json:"message"`
+	}
+	_ = json.Unmarshal(b, &m)
+	if m.Message == "" {
+		m.Message = strings.TrimSpace(string(b))
+	}
+	return &apiError{Status: resp.StatusCode, Message: m.Message}
+}
+
 func (d *Docker) call(ctx context.Context, method, p string, q url.Values, body any, hdr http.Header, out any) error {
 	var rdr io.Reader
 	if body != nil {
@@ -90,37 +234,16 @@ func (d *Docker) call(ctx context.Context, method, p string, q url.Values, body 
 			return err
 		}
 		rdr = bytes.NewReader(b)
+		if hdr = hdr.Clone(); hdr == nil {
+			hdr = http.Header{}
+		}
+		hdr.Set("Content-Type", "application/json")
 	}
-	u := "http://docker/v1.43" + p
-	if len(q) > 0 {
-		u += "?" + q.Encode()
-	}
-	req, err := http.NewRequestWithContext(ctx, method, u, rdr)
-	if err != nil {
-		return err
-	}
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	for k, v := range hdr {
-		req.Header[k] = v
-	}
-	resp, err := d.hc.Do(req)
+	resp, err := d.do(ctx, method, p, q, rdr, hdr)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
-		var m struct {
-			Message string `json:"message"`
-		}
-		_ = json.Unmarshal(b, &m)
-		if m.Message == "" {
-			m.Message = strings.TrimSpace(string(b))
-		}
-		return &apiError{Status: resp.StatusCode, Message: m.Message}
-	}
 	if out != nil {
 		return json.NewDecoder(io.LimitReader(resp.Body, 32<<20)).Decode(out)
 	}
@@ -174,12 +297,15 @@ func (d *Docker) EnsureNetwork(ctx context.Context, n NetworkSpec) (*NetworkInfo
 	if !isNotFound(err) {
 		return nil, err
 	}
+	ver, err := d.apiVersion(ctx)
+	if err != nil {
+		return nil, err
+	}
 	body := map[string]any{
-		"Name":           name,
-		"Driver":         "bridge",
-		"CheckDuplicate": true,
-		"Internal":       false,
-		"EnableIPv6":     false,
+		"Name":       name,
+		"Driver":     "bridge",
+		"Internal":   false,
+		"EnableIPv6": false,
 		"Options": map[string]string{
 			"com.docker.network.bridge.enable_icc":           "true",
 			"com.docker.network.bridge.enable_ip_masquerade": "true",
@@ -187,6 +313,11 @@ func (d *Docker) EnsureNetwork(ctx context.Context, n NetworkSpec) (*NetworkInfo
 		},
 		"Labels": map[string]string{"org.opendeploy.managed": "true", "org.opendeploy.environment": n.EnvironmentID,
 			"org.opendeploy.project": n.ProjectID, "org.opendeploy.kind": n.Kind},
+	}
+	if ver.less(apiVersion{1, 44}) {
+		// From 1.44 an engine always refuses a duplicate name and the
+		// field is deprecated; before that the check must be asked for.
+		body["CheckDuplicate"] = true
 	}
 	if err := d.call(ctx, http.MethodPost, "/networks/create", nil, body, nil, nil); err != nil {
 		var ae *apiError
@@ -255,30 +386,29 @@ func (d *Docker) pull(ctx context.Context, image string, auth RegistryAuth) erro
 		hdr.Set("X-Registry-Auth", base64.URLEncoding.EncodeToString(a))
 	}
 	// The pull endpoint streams JSON progress; errors appear in-stream.
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://docker/v1.43/images/create?"+q.Encode(), nil)
+	resp, err := d.do(ctx, http.MethodPost, "/images/create", q, nil, hdr)
 	if err != nil {
-		return err
-	}
-	req.Header = hdr
-	resp, err := d.hc.Do(req)
-	if err != nil {
-		return err
+		return fmt.Errorf("pull %s: %w", image, err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
-		return fmt.Errorf("pull %s: %d %s", image, resp.StatusCode, strings.TrimSpace(string(b)))
-	}
 	dec := json.NewDecoder(resp.Body)
 	for {
+		// "error" is deprecated since API 1.48 and may be left empty by
+		// newer engines; "errorDetail" carries the same message.
 		var m struct {
-			Error string `json:"error"`
+			Error       string `json:"error"`
+			ErrorDetail struct {
+				Message string `json:"message"`
+			} `json:"errorDetail"`
 		}
 		if err := dec.Decode(&m); err != nil {
 			if errors.Is(err, io.EOF) {
 				return nil
 			}
 			return err
+		}
+		if msg := m.ErrorDetail.Message; msg != "" {
+			return fmt.Errorf("pull %s: %s", image, msg)
 		}
 		if m.Error != "" {
 			return fmt.Errorf("pull %s: %s", image, m.Error)
@@ -578,21 +708,14 @@ func (d *Docker) Logs(ctx context.Context, id string, tail int, since time.Time)
 	if !since.IsZero() {
 		q.Set("since", strconv.FormatInt(since.Unix(), 10))
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker/v1.43/containers/"+containerName(id)+"/logs?"+q.Encode(), nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := d.hc.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == 404 {
+	resp, err := d.do(ctx, http.MethodGet, "/containers/"+containerName(id)+"/logs", q, nil, nil)
+	if isNotFound(err) {
 		return nil, ErrNotFound
 	}
-	if resp.StatusCode/100 != 2 {
-		return nil, fmt.Errorf("logs: %d", resp.StatusCode)
+	if err != nil {
+		return nil, fmt.Errorf("logs: %w", err)
 	}
+	defer resp.Body.Close()
 	var out []LogLine
 	r := bufio.NewReader(io.LimitReader(resp.Body, 16<<20))
 	hdr := make([]byte, 8)
