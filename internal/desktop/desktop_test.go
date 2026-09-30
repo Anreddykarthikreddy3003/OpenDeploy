@@ -7,6 +7,8 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -24,6 +26,8 @@ type fakeGuest struct {
 	ensured  int
 	exit     chan error
 	token    string
+	tokenErr error // BootstrapToken fails with it when set
+	tokens   int   // BootstrapToken calls
 	failBoot bool
 }
 
@@ -50,7 +54,21 @@ func (g *fakeGuest) Stop(context.Context, time.Duration) error {
 func (g *fakeGuest) BootstrapToken(context.Context) (string, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.tokens++
+	if g.tokenErr != nil {
+		return "", g.tokenErr
+	}
 	return g.token, nil
+}
+func (g *fakeGuest) setToken(tok string, err error) {
+	g.mu.Lock()
+	g.token, g.tokenErr = tok, err
+	g.mu.Unlock()
+}
+func (g *fakeGuest) tokenReads() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.tokens
 }
 func (g *fakeGuest) crash() {
 	g.mu.Lock()
@@ -143,6 +161,108 @@ func TestSupervisorRestartsGuestThatNeverBecomesReady(t *testing.T) {
 	waitFor(t, "second boot", func() bool { st, _ := g.count(); return st >= 2 })
 	if _, stops := g.count(); stops == 0 {
 		t.Fatal("unready guest was not stopped before restarting")
+	}
+}
+
+// runSupervisor runs s until the test ends; it is stopped before the
+// TempDir cleanup, since it writes status.json.
+func runSupervisor(t *testing.T, s *Supervisor) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = s.Run(ctx); close(done) }()
+	t.Cleanup(func() { cancel(); <-done })
+}
+
+func tokenFile(dir string) (string, bool) {
+	b, err := os.ReadFile(TokenPath(dir))
+	return strings.TrimSpace(string(b)), err == nil
+}
+
+// Regression test for F-7: the host copy of the bootstrap token was
+// refreshed only when the guest became ready, so it outlived the owner's
+// creation until the service restarted.
+func TestSupervisorRemovesSpentTokenWhileGuestRuns(t *testing.T) {
+	dir := t.TempDir()
+	g := &fakeGuest{token: "tok-123"}
+	s := &Supervisor{Guest: g, Config: Config{DataDir: dir}, TokenRecheck: 20 * time.Millisecond,
+		Healthy: func(context.Context) error { return nil }}
+	runSupervisor(t, s)
+
+	waitFor(t, "token published", func() bool { tok, _ := tokenFile(dir); return tok == "tok-123" })
+	g.setToken("", nil) // the owner account was created in the dashboard
+	waitFor(t, "host token removed", func() bool { _, ok := tokenFile(dir); return !ok })
+	if starts, stops := g.count(); starts != 1 || stops != 0 || s.Status().Restart != 0 {
+		t.Fatalf("guest restarted to remove the token: starts %d stops %d restarts %d", starts, stops, s.Status().Restart)
+	}
+	if st := s.Status().State; st != "running" {
+		t.Fatalf("state %q", st)
+	}
+	// The owner exists: the guest is not asked again for this run.
+	n := g.tokenReads()
+	time.Sleep(20 * s.TokenRecheck)
+	if m := g.tokenReads(); m != n {
+		t.Fatalf("guest asked for the token %d more times after the owner existed", m-n)
+	}
+}
+
+// Failing to ask the guest must not remove the host copy; only the guest
+// reporting no token does.
+func TestSupervisorKeepsTokenWhenGuestCannotBeAsked(t *testing.T) {
+	dir := t.TempDir()
+	g := &fakeGuest{token: "tok-123"}
+	s := &Supervisor{Guest: g, Config: Config{DataDir: dir}, TokenRecheck: 20 * time.Millisecond,
+		Healthy: func(context.Context) error { return nil }}
+	runSupervisor(t, s)
+
+	waitFor(t, "token published", func() bool { tok, _ := tokenFile(dir); return tok == "tok-123" })
+	g.setToken("", errors.New("wsl.exe: timed out"))
+	n := g.tokenReads()
+	waitFor(t, "token rechecked", func() bool { return g.tokenReads() >= n+3 })
+	if tok, ok := tokenFile(dir); !ok || tok != "tok-123" {
+		t.Fatalf("host token after failed checks: %q (exists %v)", tok, ok)
+	}
+	// The checks go on after failures, and the copy goes once the guest answers.
+	g.setToken("", nil)
+	waitFor(t, "host token removed", func() bool { _, ok := tokenFile(dir); return !ok })
+}
+
+func TestNeedsBootstrap(t *testing.T) {
+	var body atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v2/setup" {
+			http.NotFound(w, r)
+			return
+		}
+		b := body.Load().(string)
+		if b == "" {
+			http.Error(w, "store unavailable", http.StatusInternalServerError)
+			return
+		}
+		_, _ = io.WriteString(w, b)
+	}))
+	port := srv.Listener.Addr().(*net.TCPAddr).Port
+	ctx := context.Background()
+	for _, c := range []struct {
+		body    string
+		want    bool
+		wantErr bool
+	}{
+		{body: `{"needs_bootstrap":true,"version":"dev","require_mfa":false}`, want: true},
+		{body: `{"needs_bootstrap":false,"version":"dev","require_mfa":false}`, want: false},
+		{body: "", wantErr: true},                  // HTTP 500
+		{body: `{"version":"dev"}`, wantErr: true}, // not the setup endpoint's answer
+		{body: `<html>`, wantErr: true},
+	} {
+		body.Store(c.body)
+		got, err := NeedsBootstrap(ctx, port)
+		if (err != nil) != c.wantErr || (err == nil && got != c.want) {
+			t.Errorf("%q: got %v, %v", c.body, got, err)
+		}
+	}
+	srv.Close()
+	if _, err := NeedsBootstrap(ctx, port); err == nil {
+		t.Error("unreachable API: no error")
 	}
 }
 

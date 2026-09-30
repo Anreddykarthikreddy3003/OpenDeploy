@@ -167,8 +167,21 @@ func status(cfg desktop.Config) error {
 	} else {
 		fmt.Println("API:         healthy")
 	}
-	if b, err := os.ReadFile(desktop.TokenPath(cfg.DataDir)); err == nil {
-		fmt.Printf("\nCreate the owner account in the dashboard with this one-time bootstrap token:\n\n    %s\n\n", strings.TrimSpace(string(b)))
-	}
+	fmt.Print(bootstrapNotice(context.Background(), cfg))
 	return nil
+}
+
+// bootstrapNotice is the owner bootstrap token hint for status: the host
+// copy of the token, unless the node's API says the owner already exists
+// (the supervisor removes a spent copy only on its next check). When the
+// API cannot be asked, the copy is shown as before.
+func bootstrapNotice(ctx context.Context, cfg desktop.Config) string {
+	b, err := os.ReadFile(desktop.TokenPath(cfg.DataDir))
+	if err != nil {
+		return ""
+	}
+	if needs, err := desktop.NeedsBootstrap(ctx, cfg.APIPort); err == nil && !needs {
+		return ""
+	}
+	return fmt.Sprintf("\nCreate the owner account in the dashboard with this one-time bootstrap token:\n\n    %s\n\n", strings.TrimSpace(string(b)))
 }

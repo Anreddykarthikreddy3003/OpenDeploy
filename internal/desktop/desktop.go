@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -107,6 +108,11 @@ type Supervisor struct {
 	// ReadyTimeout bounds how long a booting guest may take to serve the API.
 	ReadyTimeout time.Duration
 	MaxBackoff   time.Duration
+	// TokenRecheck is how often a ready guest is asked for its bootstrap
+	// token again while the host holds a copy, so the copy goes once the
+	// owner account exists (default 30s: each check runs wsl.exe or dials
+	// the VM).
+	TokenRecheck time.Duration
 
 	mu     sync.Mutex
 	status Status
@@ -150,6 +156,32 @@ func HealthCheck(port int) func(ctx context.Context) error {
 	}
 }
 
+// NeedsBootstrap asks the node API through the host loopback port whether
+// the owner account is still to be created (GET /api/v2/setup, which needs
+// no session).
+func NeedsBootstrap(ctx context.Context, port int) (bool, error) {
+	hc := &http.Client{Timeout: 5 * time.Second}
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/api/v2/setup", port), nil)
+	res, err := hc.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("setup status: %s", res.Status)
+	}
+	var st struct {
+		NeedsBootstrap *bool `json:"needs_bootstrap"`
+	}
+	if err := json.NewDecoder(io.LimitReader(res.Body, 64<<10)).Decode(&st); err != nil {
+		return false, fmt.Errorf("setup status: %w", err)
+	}
+	if st.NeedsBootstrap == nil {
+		return false, errors.New("setup status: no needs_bootstrap field")
+	}
+	return *st.NeedsBootstrap, nil
+}
+
 // Run supervises the guest until ctx is cancelled, then stops it.
 func (s *Supervisor) Run(ctx context.Context) error {
 	s.Config.Defaults()
@@ -164,6 +196,9 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	}
 	if s.MaxBackoff == 0 {
 		s.MaxBackoff = time.Minute
+	}
+	if s.TokenRecheck == 0 {
+		s.TokenRecheck = 30 * time.Second
 	}
 	if err := os.MkdirAll(s.Config.DataDir, 0o755); err != nil {
 		return err
@@ -213,6 +248,12 @@ func (s *Supervisor) watch(ctx context.Context, done <-chan error) error {
 	deadline := time.Now().Add(s.ReadyTimeout)
 	tick := time.NewTicker(2 * time.Second)
 	defer tick.Stop()
+	// While the host holds a copy of the bootstrap token, the guest is asked
+	// again every TokenRecheck. The copy is removed as soon as the guest
+	// reports no token (the owner exists), and the checks stop then.
+	recheck := time.NewTimer(s.TokenRecheck)
+	recheck.Stop()
+	defer recheck.Stop()
 	ready := false
 	failures := 0
 	for {
@@ -224,13 +265,19 @@ func (s *Supervisor) watch(ctx context.Context, done <-chan error) error {
 				err = errors.New("guest exited")
 			}
 			return err
+		case <-recheck.C:
+			if s.publishToken(ctx) {
+				recheck.Reset(s.TokenRecheck)
+			}
 		case <-tick.C:
 			err := s.Healthy(ctx)
 			switch {
 			case err == nil && !ready:
 				ready, failures = true, 0
 				s.setStatus("running", "")
-				s.publishToken(ctx)
+				if s.publishToken(ctx) {
+					recheck.Reset(s.TokenRecheck)
+				}
 			case err == nil:
 				failures = 0
 			case ready:
@@ -248,21 +295,26 @@ func (s *Supervisor) watch(ctx context.Context, done <-chan error) error {
 }
 
 // publishToken copies the guest's bootstrap token to the host data dir (or
-// removes a stale copy once the owner exists).
-func (s *Supervisor) publishToken(ctx context.Context) {
+// removes a stale copy once the owner exists). Only the guest reporting no
+// token removes the copy; failing to ask leaves it in place. It reports
+// whether a host copy remains.
+func (s *Supervisor) publishToken(ctx context.Context) bool {
 	tctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	tok, err := s.Guest.BootstrapToken(tctx)
-	if err != nil {
-		s.Log.Debug("bootstrap token unavailable", "err", err)
-		return
-	}
 	p := TokenPath(s.Config.DataDir)
-	if tok == "" {
-		_ = os.Remove(p)
-		return
+	tok, err := s.Guest.BootstrapToken(tctx)
+	switch {
+	case err != nil:
+		s.Log.Debug("bootstrap token unavailable", "err", err)
+	case tok == "":
+		if os.Remove(p) == nil {
+			s.Log.Info("owner account exists: removed the host copy of the bootstrap token")
+		}
+	default:
+		_ = os.WriteFile(p, []byte(tok+"\n"), 0o600)
 	}
-	_ = os.WriteFile(p, []byte(tok+"\n"), 0o600)
+	_, err = os.Stat(p)
+	return err == nil
 }
 
 func errString(err error) string {
