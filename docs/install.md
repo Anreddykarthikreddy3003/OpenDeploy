@@ -74,7 +74,7 @@ This stops the services. Node data in `/var/lib/opendeploy` and `/etc/opendeploy
 
 **Install:** run `OpenDeploy-<version>-x64.msi` as an administrator. The installer:
 - copies `opendeploy-desktop.exe` and `opendeployctl.exe` to `C:\Program Files\OpenDeploy\bin` (added to the system PATH), and the OpenDeploy WSL image to `C:\Program Files\OpenDeploy\guest`;
-- creates the local service account `opendeploy-svc`: a standard user (not an administrator), hidden from the sign-in screen, with the "log on as a service" right and a random password that is never stored;
+- creates the local service account `opendeploy-svc`: a standard user (not an administrator), hidden from the sign-in screen, with a random password that is never stored. It can only run as a service: it has the "log on as a service" right and is denied interactive, Remote Desktop, network and batch logon;
 - registers and starts the **OpenDeploy** Windows service (automatic, delayed start). It starts at boot without anyone logging in.
 
 **Data folder:** the node's data (its WSL disk, status and logs) goes in `C:\ProgramData\OpenDeploy` unless you choose another folder at the first install, from an administrator prompt:
@@ -98,7 +98,7 @@ The first line is the data folder, for example `Data folder: A:\OpenDeploy`. Onc
 ```
 opendeploy-desktop uninstall --purge
 ```
-It deletes the service account and the data folder the node was installed with. It deletes the folder only if it holds the `.opendeploy-data` marker (or is the default `C:\ProgramData\OpenDeploy`); otherwise it stops and changes nothing.
+It deletes the service account (and its logon rights) and the data folder the node was installed with. It deletes the folder only if it holds the `.opendeploy-data` marker (or is the default `C:\ProgramData\OpenDeploy`); otherwise it stops and changes nothing.
 
 ## macOS 13+ (Apple silicon and Intel)
 

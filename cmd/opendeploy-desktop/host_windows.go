@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 	"unsafe"
@@ -23,8 +24,9 @@ import (
 
 // WSL distributions are registered per user and WSL does not run under
 // LocalSystem, so the service runs as a dedicated local account that exists
-// only for this purpose: no interactive logon, hidden from the sign-in
-// screen, random password never stored.
+// only for this purpose: a standard user, hidden from the sign-in screen,
+// with a random password that is never stored. It may log on only as a
+// service; every other logon type is denied (serviceAccountRights).
 const (
 	serviceName    = "OpenDeploy"
 	serviceAccount = "opendeploy-svc"
@@ -118,32 +120,33 @@ func run(cfg desktop.Config) error {
 // ---- install / uninstall ---------------------------------------------------------
 
 var (
-	netapi32          = windows.NewLazySystemDLL("netapi32.dll")
-	procNetUserAdd    = netapi32.NewProc("NetUserAdd")
-	procNetUserSet    = netapi32.NewProc("NetUserSetInfo")
-	procNetUserDel    = netapi32.NewProc("NetUserDel")
-	advapi32          = windows.NewLazySystemDLL("advapi32.dll")
-	procLsaOpenPolicy = advapi32.NewProc("LsaOpenPolicy")
-	procLsaAddRights  = advapi32.NewProc("LsaAddAccountRights")
-	procLsaClose      = advapi32.NewProc("LsaClose")
-	procLsaNtToWin    = advapi32.NewProc("LsaNtStatusToWinError")
+	netapi32            = windows.NewLazySystemDLL("netapi32.dll")
+	procNetUserAdd      = netapi32.NewProc("NetUserAdd")
+	procNetUserSet      = netapi32.NewProc("NetUserSetInfo")
+	procNetUserDel      = netapi32.NewProc("NetUserDel")
+	advapi32            = windows.NewLazySystemDLL("advapi32.dll")
+	procLsaOpenPolicy   = advapi32.NewProc("LsaOpenPolicy")
+	procLsaAddRights    = advapi32.NewProc("LsaAddAccountRights")
+	procLsaRemoveRights = advapi32.NewProc("LsaRemoveAccountRights")
+	procLsaClose        = advapi32.NewProc("LsaClose")
+	procLsaNtToWin      = advapi32.NewProc("LsaNtStatusToWinError")
 )
 
 const (
-	nerrUserExists          = 2224
-	nerrUserNotFound        = 2221
-	userPrivUser            = 1
-	ufScript                = 0x0001
-	ufPasswdCantChange      = 0x0040
-	ufDontExpirePasswd      = 0x10000
-	policyCreateAccount     = 0x00000010
-	policyLookupNames       = 0x00000800
-	seServiceLogonRight     = "SeServiceLogonRight"
-	userListKey             = `SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList`
-	passwordAlphabet        = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789-_.!#%+="
-	passwordLength          = 40
-	serviceRestartDelay     = 15 * time.Second
-	serviceFailureResetSecs = 24 * 60 * 60
+	nerrUserExists           = 2224
+	nerrUserNotFound         = 2221
+	userPrivUser             = 1
+	ufScript                 = 0x0001
+	ufPasswdCantChange       = 0x0040
+	ufDontExpirePasswd       = 0x10000
+	policyCreateAccount      = 0x00000010
+	policyLookupNames        = 0x00000800
+	statusObjectNameNotFound = 0xC0000034 // LSA: the account holds no rights
+	userListKey              = `SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList`
+	passwordAlphabet         = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789-_.!#%+="
+	passwordLength           = 40
+	serviceRestartDelay      = 15 * time.Second
+	serviceFailureResetSecs  = 24 * 60 * 60
 )
 
 type userInfo1 struct {
@@ -196,7 +199,7 @@ func ensureAccount() (string, error) {
 	default:
 		return "", fmt.Errorf("create account %s: NetUserAdd error %d", serviceAccount, r)
 	}
-	if err := grantServiceLogon(); err != nil {
+	if err := grantAccountRights(); err != nil {
 		return "", err
 	}
 	// Hide it from the sign-in screen.
@@ -207,24 +210,89 @@ func ensureAccount() (string, error) {
 	return pw, nil
 }
 
-func grantServiceLogon() error {
+// serviceAccountRights are the service account's user rights: it may log on
+// as a service and is denied every other logon type (at the console, over
+// Remote Desktop, from the network, as a batch job), so the account cannot
+// be used to sign in, even with its password.
+func serviceAccountRights() []string {
+	return []string{
+		"SeServiceLogonRight",
+		"SeDenyInteractiveLogonRight",
+		"SeDenyRemoteInteractiveLogonRight",
+		"SeDenyNetworkLogonRight",
+		"SeDenyBatchLogonRight",
+	}
+}
+
+// lsaStrings builds the LSA_UNICODE_STRING array that LsaAddAccountRights
+// takes (a pointer to the first element and a count).
+func lsaStrings(rights []string) ([]windows.NTUnicodeString, error) {
+	out := make([]windows.NTUnicodeString, len(rights))
+	for i, r := range rights {
+		u, err := windows.NewNTUnicodeString(r)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = *u
+	}
+	return out, nil
+}
+
+func openPolicy(access uintptr) (uintptr, error) {
+	var attrs windows.OBJECT_ATTRIBUTES
+	attrs.Length = uint32(unsafe.Sizeof(attrs))
+	var policy uintptr
+	if st, _, _ := procLsaOpenPolicy.Call(0, uintptr(unsafe.Pointer(&attrs)), access, uintptr(unsafe.Pointer(&policy))); st != 0 {
+		return 0, fmt.Errorf("LsaOpenPolicy: %w", lsaError(st))
+	}
+	return policy, nil
+}
+
+// grantAccountRights gives the account serviceAccountRights. Adding rights
+// the account already holds succeeds, so a reinstall is idempotent.
+func grantAccountRights() error {
 	sid, _, _, err := windows.LookupSID("", serviceAccount)
 	if err != nil {
 		return err
 	}
-	var attrs windows.OBJECT_ATTRIBUTES
-	attrs.Length = uint32(unsafe.Sizeof(attrs))
-	var policy uintptr
-	if st, _, _ := procLsaOpenPolicy.Call(0, uintptr(unsafe.Pointer(&attrs)), policyCreateAccount|policyLookupNames, uintptr(unsafe.Pointer(&policy))); st != 0 {
-		return fmt.Errorf("LsaOpenPolicy: %w", lsaError(st))
-	}
-	defer procLsaClose.Call(policy)
-	right, err := windows.NewNTUnicodeString(seServiceLogonRight)
+	rights, err := lsaStrings(serviceAccountRights())
 	if err != nil {
 		return err
 	}
-	if st, _, _ := procLsaAddRights.Call(policy, uintptr(unsafe.Pointer(sid)), uintptr(unsafe.Pointer(right)), 1); st != 0 {
-		return fmt.Errorf("grant %s: %w", seServiceLogonRight, lsaError(st))
+	// Adding rights may create the account's LSA entry.
+	policy, err := openPolicy(policyCreateAccount | policyLookupNames)
+	if err != nil {
+		return err
+	}
+	defer procLsaClose.Call(policy)
+	st, _, _ := procLsaAddRights.Call(policy, uintptr(unsafe.Pointer(sid)), uintptr(unsafe.Pointer(&rights[0])), uintptr(len(rights)))
+	runtime.KeepAlive(rights)
+	if st != 0 {
+		return fmt.Errorf("grant %s to %s: %w", strings.Join(serviceAccountRights(), ", "), serviceAccount, lsaError(st))
+	}
+	return nil
+}
+
+// removeAccountRights removes every user right of the account (AllRights),
+// so no entry for its SID is left in the local security policy once the
+// account is deleted. An account that is gone or holds no rights is fine.
+func removeAccountRights() error {
+	sid, _, _, err := windows.LookupSID("", serviceAccount)
+	if errors.Is(err, windows.ERROR_NONE_MAPPED) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	// LsaRemoveAccountRights needs POLICY_LOOKUP_NAMES.
+	policy, err := openPolicy(policyLookupNames)
+	if err != nil {
+		return err
+	}
+	defer procLsaClose.Call(policy)
+	const allRights = 1
+	if st, _, _ := procLsaRemoveRights.Call(policy, uintptr(unsafe.Pointer(sid)), allRights, 0, 0); st != 0 && st != statusObjectNameNotFound {
+		return fmt.Errorf("remove the user rights of %s: %w", serviceAccount, lsaError(st))
 	}
 	return nil
 }
@@ -388,7 +456,11 @@ func uninstallService(cfg desktop.Config, purge bool) error {
 		return nil
 	}
 	// The distro is registered to the service account; deleting the account
-	// and the directory holding ext4.vhdx removes the node entirely.
+	// and the directory holding ext4.vhdx removes the node entirely. Its
+	// rights go first: the policy keeps them by SID after the account is gone.
+	if err := removeAccountRights(); err != nil {
+		return err
+	}
 	name, _ := windows.UTF16PtrFromString(serviceAccount)
 	if r, _, _ := procNetUserDel.Call(0, uintptr(unsafe.Pointer(name))); r != 0 && r != nerrUserNotFound {
 		return fmt.Errorf("delete account %s: NetUserDel error %d", serviceAccount, r)
