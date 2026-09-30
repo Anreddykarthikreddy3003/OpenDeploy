@@ -80,7 +80,7 @@ func VerifyPassword(hash, pw string) bool {
 	if _, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &m, &t, &p); err != nil {
 		return false
 	}
-	if m > 1<<20 || t > 20 || p > 16 {
+	if m > 1<<20 || t > 20 || p > 16 || m < 8*uint32(p) || t == 0 || p == 0 {
 		return false
 	}
 	salt, err := base64.RawStdEncoding.DecodeString(parts[4])
@@ -88,7 +88,7 @@ func VerifyPassword(hash, pw string) bool {
 		return false
 	}
 	want, err := base64.RawStdEncoding.DecodeString(parts[5])
-	if err != nil {
+	if err != nil || len(want) < 16 || len(salt) < 8 { // an empty key would match anything
 		return false
 	}
 	got := argon2.IDKey([]byte(pw), salt, t, m, p, uint32(len(want)))

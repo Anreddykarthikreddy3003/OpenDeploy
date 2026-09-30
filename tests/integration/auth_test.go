@@ -190,6 +190,104 @@ func TestAuthMFAAndSessions(t *testing.T) {
 		t.Fatalf("viewer-capped token created a user: %d", code)
 	}
 
+	// ---- MFA bypasses closed (review of the auth handlers)
+	// A password-only (pre-MFA) session cannot enroll its own TOTP on a
+	// key-protected account.
+	c5 := newClient(t, origin)
+	c5.do("POST", "/api/v2/auth/login", map[string]string{"email": "o@example.com", "password": "correct horse battery"}, &sess)
+	c5.csrf = sess.CSRFToken
+	if code := c5.do("POST", "/api/v2/auth/totp/enroll", nil, &e); code != 401 {
+		t.Fatalf("pre-MFA session enrolled TOTP on a key-protected account: %d %+v", code, e)
+	}
+	// Read-only tokens cannot manage sessions or tokens.
+	if code := tc.do("POST", "/api/v2/auth/sessions/revoke-others", nil, nil); code != 403 {
+		t.Fatalf("viewer token revoked sessions: %d", code)
+	}
+	if code := tc.do("DELETE", "/api/v2/auth/tokens/tok_x", nil, nil); code != 403 {
+		t.Fatalf("viewer token revoked a token: %d", code)
+	}
+
+	// A developer enrolls TOTP; confirming again is refused; disabling it
+	// revokes a session that was still waiting for its second factor.
+	var dev struct {
+		ID string `json:"id"`
+	}
+	if code := c2.do("POST", "/api/v2/users", map[string]string{"email": "d@example.com", "password": "developer pass 123", "role": "developer"}, &dev); code != 201 || dev.ID == "" {
+		t.Fatalf("create developer: %d %+v", code, dev)
+	}
+	dv := newClient(t, origin)
+	dv.do("POST", "/api/v2/auth/login", map[string]string{"email": "d@example.com", "password": "developer pass 123"}, &sess)
+	dv.csrf = sess.CSRFToken
+	dv.do("POST", "/api/v2/auth/totp/enroll", nil, &totp)
+	dcode, _ := auth.TOTPCode(totp.Secret, time.Now())
+	var rc struct {
+		RecoveryCodes []string `json:"recovery_codes"`
+	}
+	if code := dv.do("POST", "/api/v2/auth/totp/confirm", map[string]string{"code": dcode}, &rc); code != 200 || len(rc.RecoveryCodes) == 0 {
+		t.Fatalf("developer totp confirm: %d", code)
+	}
+	if code := dv.do("POST", "/api/v2/auth/totp/confirm", map[string]string{"code": dcode}, nil); code != 409 {
+		t.Fatalf("second confirm of an enabled TOTP: %d", code)
+	}
+	var devTok struct {
+		Token string `json:"token"`
+	}
+	if code := dv.do("POST", "/api/v2/auth/tokens", map[string]any{"name": "laptop", "role": "developer"}, &devTok); code != 201 {
+		t.Fatalf("developer token: %d", code)
+	}
+	dvPre := newClient(t, origin)
+	dvPre.do("POST", "/api/v2/auth/login", map[string]string{"email": "d@example.com", "password": "developer pass 123"}, &sess)
+	dvPre.csrf = sess.CSRFToken
+	if code := dvPre.do("GET", "/api/v2/projects", nil, &e); code != 401 || e.Code != "mfa_required" {
+		t.Fatalf("developer pre-MFA session: %d %+v", code, e)
+	}
+	if code := dv.do("POST", "/api/v2/auth/reauth", map[string]string{"password": "developer pass 123", "recovery_code": rc.RecoveryCodes[0]}, nil); code != 200 {
+		t.Fatalf("developer reauth: %d", code)
+	}
+	if code := dv.do("DELETE", "/api/v2/auth/totp", nil, nil); code != 200 {
+		t.Fatalf("disable totp: %d", code)
+	}
+	if code := dvPre.do("GET", "/api/v2/projects", nil, nil); code != 401 {
+		t.Fatalf("a pending pre-MFA session became a full session when TOTP was disabled: %d", code)
+	}
+	// An owner's MFA reset (account recovery) revokes the user's tokens.
+	dt := newClient(t, origin)
+	dt.hc.Transport = bearer{devTok.Token}
+	if code := dt.do("GET", "/api/v2/projects", nil, nil); code != 200 {
+		t.Fatalf("developer token before reset: %d", code)
+	}
+	c2.do("POST", "/api/v2/auth/webauthn/login/begin", map[string]any{}, &opts)
+	c2.do("POST", "/api/v2/auth/reauth", map[string]any{"password": "correct horse battery", "webauthn": key.get(opts, ownerID, 1)}, nil)
+	if code := c2.do("PATCH", "/api/v2/users/"+dev.ID, map[string]any{"reset_mfa": true}, nil); code != 200 {
+		t.Fatalf("reset mfa: %d", code)
+	}
+	if code := dt.do("GET", "/api/v2/projects", nil, nil); code != 401 {
+		t.Fatalf("token survived the account's MFA reset: %d", code)
+	}
+
+	// Second-factor failures lock the account, and a locked account gives
+	// the same answer for a right or wrong password.
+	ad3 := newClient(t, origin)
+	ad3.do("POST", "/api/v2/auth/login", map[string]string{"email": "a@example.com", "password": "admin password 123"}, &sess)
+	ad3.csrf = sess.CSRFToken
+	locked := false
+	for i := 0; i < 6 && !locked; i++ {
+		locked = ad3.do("POST", "/api/v2/auth/mfa", map[string]string{"code": "000000"}, &e) == 429
+	}
+	if !locked {
+		t.Fatal("repeated wrong second factors never locked the account")
+	}
+	fresh, _ := auth.TOTPCode(totp.Secret, time.Now().Add(30*time.Second))
+	if code := ad3.do("POST", "/api/v2/auth/mfa", map[string]string{"code": fresh}, nil); code != 429 {
+		t.Fatalf("locked account accepted a second factor: %d", code)
+	}
+	for _, pw := range []string{"admin password 123", "wrong password 123"} {
+		lc := newClient(t, origin)
+		if code := lc.do("POST", "/api/v2/auth/login", map[string]string{"email": "a@example.com", "password": pw}, &e); code != 429 {
+			t.Fatalf("locked login with %q: %d (the answer must not depend on the password)", pw, code)
+		}
+	}
+
 	// ---- MFA removal keeps the mandatory factor
 	var creds []struct {
 		ID string `json:"id"`

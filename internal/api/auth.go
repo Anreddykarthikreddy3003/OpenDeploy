@@ -171,6 +171,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) error {
 		s.audit(r, "auth.login", "user", email, "", audit.Denied, map[string]string{"reason": reason})
 		return errf(401, "invalid_credentials", "invalid email or password")
 	}
+	// A locked account answers the same whatever the password, so the lock
+	// never confirms a guess.
+	if err == nil && u.LockedUntil != "" && u.LockedUntil > state.Now() {
+		s.audit(r, "auth.login", "user", email, "", audit.Denied, map[string]string{"reason": "locked"})
+		return errf(429, "locked", "account temporarily locked after repeated failures")
+	}
 	if err != nil || !ok {
 		if err == nil {
 			_ = s.S.RecordLoginFailure(r.Context(), u.ID)
@@ -180,21 +186,18 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) error {
 	if u.Disabled {
 		return fail("account disabled")
 	}
-	if u.LockedUntil != "" && u.LockedUntil > state.Now() {
-		return errf(429, "locked", "account temporarily locked after repeated failures")
-	}
-	_ = s.S.ResetLoginFailures(r.Context(), u.ID)
 	needsMFA := u.TOTPEnabled || u.WebAuthnCount > 0
+	if !needsMFA {
+		// With a second factor, failures are reset only once it passes, so
+		// guessing codes accumulates towards the lock.
+		_ = s.S.ResetLoginFailures(r.Context(), u.ID)
+	}
 	// A session is MFA-complete only when no second factor is enrolled AND
 	// none is required for the role; otherwise the user must verify (or
 	// enroll) before anything but the MFA endpoints works.
 	sess, err := s.newSession(w, r, u, !needsMFA && !s.mfaMandatory(u))
 	if err != nil {
 		return err
-	}
-	if needsMFA {
-		// Pre-MFA sessions can only complete MFA; they carry no reauth.
-		sess.MFAVerified = false
 	}
 	s.audit(r.WithContext(withPrincipal(r, &Principal{User: u, Session: sess})), "auth.login", "user", u.ID, "", audit.Success, map[string]string{"method": "password"})
 	writeJSON(w, 200, s.sessionView(u, sess))
@@ -239,12 +242,16 @@ func (s *Server) handleMFA(w http.ResponseWriter, r *http.Request) error {
 	if err := decode(r, &req); err != nil {
 		return err
 	}
+	if s.lockedOut(r, p.User.ID) {
+		return errf(429, "locked", "account temporarily locked after repeated failures")
+	}
 	method, ok := s.verifySecondFactor(r, p.User, req.Code, req.RecoveryCode)
 	if !ok {
 		_ = s.S.RecordLoginFailure(r.Context(), p.User.ID)
 		s.audit(r, "auth.mfa", "user", p.User.ID, "", audit.Denied, map[string]string{"method": method})
 		return errf(401, "invalid_code", "invalid verification code")
 	}
+	_ = s.S.ResetLoginFailures(r.Context(), p.User.ID)
 	if err := s.S.MarkSessionMFA(r.Context(), p.Session.ID, method); err != nil {
 		return err
 	}
@@ -323,7 +330,15 @@ func (s *Server) handleTOTPEnroll(w http.ResponseWriter, r *http.Request) error 
 	if p.Session == nil {
 		return errf(403, "session_required", "interactive session required")
 	}
-	if p.User.TOTPEnabled {
+	// Changing factors on an account that already has one needs that
+	// factor now (not just the password) and signs out every other session:
+	// otherwise a password-only session could enroll its own TOTP, or be
+	// promoted to a full session while TOTP is off during re-enrollment.
+	hasFactor := p.User.TOTPEnabled || p.User.WebAuthnCount > 0
+	if hasFactor {
+		if !p.Session.MFAVerified {
+			return errf(401, "mfa_required", "multi-factor authentication required")
+		}
 		if err := s.requireReauth(r, auth.UsersManage); err != nil {
 			return err
 		}
@@ -337,6 +352,9 @@ func (s *Server) handleTOTPEnroll(w http.ResponseWriter, r *http.Request) error 
 	if err := s.S.UpdateUser(r.Context(), p.User.ID, store.UserUpdate{TOTPSecretEnc: &enc, TOTPEnabled: &enabled}); err != nil {
 		return err
 	}
+	if hasFactor {
+		_, _ = s.S.RevokeUserSessions(r.Context(), p.User.ID, p.Session.ID)
+	}
 	writeJSON(w, 200, map[string]string{"secret": secret, "uri": auth.TOTPURI("OpenDeploy", p.User.Email, secret)})
 	return nil
 }
@@ -349,19 +367,35 @@ func (s *Server) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) error
 	if err := decode(r, &req); err != nil {
 		return err
 	}
+	if !s.authLimiter.allow("mfa:" + p.User.ID) {
+		return errf(429, "rate_limited", "too many attempts")
+	}
 	u, err := s.S.GetUser(r.Context(), p.User.ID)
 	if err != nil {
 		return err
+	}
+	if u.TOTPEnabled {
+		return errf(409, "conflict", "TOTP is already enabled; start a new enrollment to replace it")
+	}
+	if u.WebAuthnCount > 0 && (p.Session == nil || !p.Session.MFAVerified) {
+		return errf(401, "mfa_required", "multi-factor authentication required")
+	}
+	if s.lockedOut(r, u.ID) {
+		return errf(429, "locked", "account temporarily locked after repeated failures")
 	}
 	seed, err := s.Sealer.Open(u.TOTPSecretEnc, "totp:"+u.ID)
 	if err != nil || len(seed) == 0 {
 		return errf(400, "bad_request", "start enrollment first")
 	}
-	step, ok := auth.VerifyTOTP(string(seed), req.Code, time.Now(), 0)
+	step, ok := auth.VerifyTOTP(string(seed), req.Code, time.Now(), u.TOTPLastStep)
 	if !ok {
+		_ = s.S.RecordLoginFailure(r.Context(), u.ID)
 		return errf(400, "invalid_code", "invalid verification code")
 	}
-	_ = s.S.ConsumeTOTPStep(r.Context(), u.ID, step)
+	if err := s.S.ConsumeTOTPStep(r.Context(), u.ID, step); err != nil {
+		return errf(400, "invalid_code", "invalid verification code") // concurrent replay
+	}
+	_ = s.S.ResetLoginFailures(r.Context(), u.ID)
 	on := true
 	if err := s.S.UpdateUser(r.Context(), u.ID, store.UserUpdate{TOTPEnabled: &on}); err != nil {
 		return err
@@ -372,6 +406,8 @@ func (s *Server) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) error
 	}
 	if p.Session != nil {
 		_ = s.S.MarkSessionMFA(r.Context(), p.Session.ID, "totp")
+		// Sessions opened before the factor existed were password-only.
+		_, _ = s.S.RevokeUserSessions(r.Context(), u.ID, p.Session.ID)
 	}
 	s.audit(r, "auth.mfa_enroll", "user", u.ID, "", audit.Success, map[string]string{"method": "totp"})
 	writeJSON(w, 200, map[string]any{"recovery_codes": codes})
@@ -391,6 +427,13 @@ func (s *Server) handleTOTPDisable(w http.ResponseWriter, r *http.Request) error
 	if err := s.S.UpdateUser(r.Context(), p.User.ID, store.UserUpdate{TOTPEnabled: &off, TOTPSecretEnc: &empty}); err != nil {
 		return err
 	}
+	// A pending pre-MFA session must not become a full one now that the
+	// factor it was waiting for is gone.
+	keep := ""
+	if p.Session != nil {
+		keep = p.Session.ID
+	}
+	_, _ = s.S.RevokeUserSessions(r.Context(), p.User.ID, keep)
 	s.audit(r, "auth.mfa_remove", "user", p.User.ID, "", audit.Success, map[string]string{"method": "totp"})
 	writeJSON(w, 200, map[string]bool{"ok": true})
 	return nil
@@ -422,6 +465,9 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) error {
 
 func (s *Server) handleRevokeSession(w http.ResponseWriter, r *http.Request) error {
 	p := principal(r)
+	if p.Session == nil {
+		return errf(403, "session_required", "managing sessions and tokens requires an interactive session")
+	}
 	prefix := r.PathValue("id")
 	ss, err := s.S.ListSessions(r.Context(), p.User.ID)
 	if err != nil {
@@ -442,6 +488,9 @@ func (s *Server) handleRevokeSession(w http.ResponseWriter, r *http.Request) err
 
 func (s *Server) handleRevokeOtherSessions(w http.ResponseWriter, r *http.Request) error {
 	p := principal(r)
+	if p.Session == nil {
+		return errf(403, "session_required", "managing sessions and tokens requires an interactive session")
+	}
 	keep := ""
 	if p.Session != nil {
 		keep = p.Session.ID
@@ -505,6 +554,9 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) error
 
 func (s *Server) handleRevokeToken(w http.ResponseWriter, r *http.Request) error {
 	p := principal(r)
+	if p.Session == nil {
+		return errf(403, "session_required", "managing sessions and tokens requires an interactive session")
+	}
 	if err := s.S.RevokeAPIToken(r.Context(), r.PathValue("id"), p.User.ID); err != nil {
 		return err
 	}
@@ -594,18 +646,24 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) error 
 		}
 		upd.PasswordHash = &h
 	}
-	if req.ResetMFA {
-		off, empty := false, []byte{}
-		upd.TOTPEnabled, upd.TOTPSecretEnc = &off, &empty
-	}
 	if err := s.S.UpdateUser(r.Context(), id, upd); err != nil {
 		if strings.Contains(err.Error(), "last owner") {
 			return errf(409, "conflict", "%v", err)
 		}
 		return err
 	}
+	if req.ResetMFA {
+		// Every factor: TOTP, security keys and unused recovery codes.
+		if err := s.S.ResetMFA(r.Context(), id); err != nil {
+			return err
+		}
+	}
 	if (req.Disabled != nil && *req.Disabled) || req.Password != nil || req.ResetMFA || req.Role != nil {
 		_, _ = s.S.RevokeUserSessions(r.Context(), id, "")
+	}
+	if (req.Disabled != nil && *req.Disabled) || req.Password != nil || req.ResetMFA {
+		// Account recovery: tokens minted by whoever held the account go too.
+		_, _ = s.S.RevokeUserTokens(r.Context(), id)
 	}
 	d := map[string]string{"user_id": id}
 	if req.Role != nil {
@@ -627,3 +685,9 @@ func withPrincipal(r *http.Request, p *Principal) context.Context {
 func itoa(n int) string { return strconv.Itoa(n) }
 
 func versionString() string { return daemon.Version }
+
+// lockedOut reports whether the account is locked after repeated failures.
+func (s *Server) lockedOut(r *http.Request, userID string) bool {
+	u, err := s.S.GetUser(r.Context(), userID)
+	return err == nil && u.LockedUntil != "" && u.LockedUntil > state.Now()
+}

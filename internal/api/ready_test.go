@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -34,5 +35,23 @@ func TestReadinessProbeSharedAndNeverUnprobed(t *testing.T) {
 	}
 	if got := s.readiness(); len(got) != 0 || calls.Load() != 1 {
 		t.Fatalf("cached result %v after %d probes", got, calls.Load())
+	}
+}
+
+// Flooding the limiter with fresh keys must not reset a throttled key
+// (it used to discard every bucket past 10,000 keys).
+func TestLimiterFloodKeepsThrottledKeys(t *testing.T) {
+	l := newLimiter(0.2, 3)
+	for i := 0; i < 3; i++ {
+		l.allow("mfa:victim")
+	}
+	if l.allow("mfa:victim") {
+		t.Fatal("precondition: key should be throttled")
+	}
+	for i := 0; i < limiterMaxKeys+50; i++ {
+		l.allow("login:flood-" + strconv.Itoa(i))
+	}
+	if l.allow("mfa:victim") {
+		t.Fatal("throttled key was reset by a flood of new keys")
 	}
 }

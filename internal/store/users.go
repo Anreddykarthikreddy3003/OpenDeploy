@@ -608,3 +608,34 @@ func (s *Store) SetGitConnectionStatus(ctx context.Context, inst int64, status s
 		return err
 	})
 }
+
+// RevokeUserTokens revokes every API token of a user (account recovery:
+// a password or MFA reset must not leave a stolen token working).
+func (s *Store) RevokeUserTokens(ctx context.Context, userID string) (int64, error) {
+	var n int64
+	err := s.DB.Tx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, `UPDATE api_tokens SET revoked_at=? WHERE user_id=? AND revoked_at=''`, state.Now(), userID)
+		if err != nil {
+			return err
+		}
+		n, _ = res.RowsAffected()
+		return nil
+	})
+	return n, err
+}
+
+// ResetMFA removes every second factor of a user: TOTP, security keys and
+// unused recovery codes.
+func (s *Store) ResetMFA(ctx context.Context, userID string) error {
+	return s.DB.Tx(ctx, func(tx *sql.Tx) error {
+		now := state.Now()
+		if _, err := tx.ExecContext(ctx, `UPDATE users SET totp_enabled=0, totp_secret_enc=?, totp_last_step=0, updated_at=? WHERE id=?`, []byte{}, now, userID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM webauthn_credentials WHERE user_id=?`, userID); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `DELETE FROM recovery_codes WHERE user_id=?`, userID)
+		return err
+	})
+}

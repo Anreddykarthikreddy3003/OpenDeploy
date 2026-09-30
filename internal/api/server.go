@@ -206,7 +206,11 @@ func (s *Server) clientIP(r *http.Request) string {
 		if host == tp {
 			if xf := r.Header.Get("X-Forwarded-For"); xf != "" {
 				parts := strings.Split(xf, ",")
-				return strings.TrimSpace(parts[len(parts)-1])
+				last := strings.TrimSpace(parts[len(parts)-1])
+				if h, _, err := net.SplitHostPort(last); err == nil { // "ip:port", "[v6]:port"
+					last = h
+				}
+				return strings.Trim(last, "[]")
 			}
 		}
 	}
@@ -249,6 +253,11 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 func (s *Server) remoteAdminGate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip, err := netip.ParseAddr(s.clientIP(r))
+		if err != nil && !strings.HasPrefix(r.URL.Path, "/webhooks/") {
+			// An address we cannot parse is never treated as loopback.
+			writeJSON(w, 403, errf(403, "forbidden", "remote administration is not permitted from this address"))
+			return
+		}
 		if err == nil && !ip.Unmap().IsLoopback() && !strings.HasPrefix(r.URL.Path, "/webhooks/") {
 			ok := false
 			for _, pr := range s.allowed {
@@ -452,6 +461,8 @@ type bucket struct {
 	last   time.Time
 }
 
+const limiterMaxKeys = 10000
+
 type limiter struct {
 	mu    sync.Mutex
 	rate  float64 // tokens per second
@@ -469,8 +480,18 @@ func (l *limiter) allow(key string) bool {
 	now := time.Now()
 	b, ok := l.m[key]
 	if !ok {
-		if len(l.m) > 10000 {
-			l.m = map[string]*bucket{}
+		if len(l.m) >= limiterMaxKeys {
+			// Forget only buckets that have refilled completely (they carry
+			// no state); never reset a key that is being throttled.
+			full := time.Duration(l.burst/l.rate*float64(time.Second)) + time.Second
+			for k, x := range l.m {
+				if now.Sub(x.last) > full {
+					delete(l.m, k)
+				}
+			}
+			if len(l.m) >= limiterMaxKeys {
+				return false // flooded with fresh keys: fail closed
+			}
 		}
 		b = &bucket{tokens: l.burst, last: now}
 		l.m[key] = b
