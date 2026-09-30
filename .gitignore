@@ -12,3 +12,5 @@ coverage.*
 /opendeployctl
 /opendeployctl.exe
 .gate/
+.claude/
+.playwright-mcp/
