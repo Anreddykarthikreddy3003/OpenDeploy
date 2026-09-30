@@ -174,3 +174,23 @@ Not decided yet.
   was clean: no `C:\Program Files\OpenDeploy`, `A:\OpenDeploy`,
   `%ProgramData%\OpenDeploy`, `opendeploy-svc` account, `HKLM\SOFTWARE\OpenDeploy`,
   uninstall entry or PATH entry was left. Re-run from an elevated terminal.
+- 2026-10-01, W-03 first look (installed with DATADIR=A:\OpenDeploy):
+  `icacls A:\OpenDeploy` listed SYSTEM, Administrators, `opendeploy-svc`
+  and also the tester's own account with full control, so a
+  non-elevated process could read the bootstrap token. Reproducing
+  `secureDataDir` exactly (same API and SDDL) on a scratch folder gives
+  only SYSTEM, Administrators and the service account, so the code does
+  not add it. The tester confirmed they had opened the folder in File
+  Explorer and clicked "Continue", which permanently grants the clicking
+  account full control. W-03 will be re-run on the fresh install after
+  W-18, without that click, and install.md gets a warning.
+- 2026-10-01, W-06 partial: the tester signed in with a wrong TOTP code
+  (refused; the audit log shows `auth.mfa … denied method=totp`) and then
+  the right code (accepted). A wrong password through the API
+  (`POST /api/v2/auth/login`) returned 401 "invalid email or password".
+  The recovery-code and lockout steps will be done on the fresh install.
+- 2026-10-01. The tester asked for a real-world usage review across
+  Windows, Linux and desktop users, to find issues before release.
+  Started in parallel: a read-only scenario review, the F-4 fix (the
+  node is upgraded from the installed image), and push-to-deploy through
+  a tunnel with a webhook-only listener (approved; "option B").
