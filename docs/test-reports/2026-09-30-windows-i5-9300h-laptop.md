@@ -43,7 +43,32 @@ to install the missing tools.
 | A-23 | Defaults: `dns_resolver` 1.1.1.1:53; limits 100 MiB / 200 rps / 1024 connections; `proxy_listen` 0.0.0.0:3128; registry 127.0.0.1:5010; 10 GiB images; backups `@daily`, `opendeploy/`, 30 days | configuration.md | internal/config/config.go:247-292 | Confirmed |
 
 ## Release gate on this hardware (B1)
-Not run yet.
+`sudo scripts/release-gate.sh` as root in the `Ubuntu-24.04` builder distro
+(WSL 2.6.3, kernel 6.6.87.2, cgroup v2, Docker 29.1.3 with the containerd
+overlayfs snapshotter, gVisor release-20260928.0). The first run found three
+defects; the stages they failed were re-run on the fixed commit.
+
+| Stage | Run 1: 2646e5a (31 min) | Run 2: ee7d18a (12 min), `GATE_SNAPSHOTTER=native` |
+|---|---|---|
+| lint | PASS | not re-run |
+| web | PASS | not re-run |
+| vuln | PASS | not re-run |
+| unit (race, real MinIO) | PASS | not re-run |
+| soak | PASS | not re-run |
+| e2e (real apps, Pebble ACME) | FAIL: F-5 | PASS |
+| adversarial (gVisor, nftables) | FAIL: F-5 | PASS |
+| fuzz | PASS | not re-run |
+| package (deb, guest image, first boot) | PASS | PASS |
+| node (installed systemd node, chaos) | FAIL: F-6, and nested overlayfs on this host | PASS |
+| upgrade (baseline f883e2c to this build; broken releases roll back or stop) | FAIL: F-6 | PASS |
+
+The lint, web, vuln, unit, soak and fuzz stages were not re-run after the
+fixes. The fixed code (internal/runtime, cmd/opendeploy-desktop,
+scripts/release-gate.sh) was covered by gofmt, go vet and its package
+tests on Windows and in the builder. `GATE_SNAPSHOTTER=native` is the
+gate's documented setting for hosts without nested overlayfs (this host's
+Docker stores container filesystems on overlayfs). The Windows MSI is not
+a gate stage; it is tested below.
 
 ## Test results
 | ID | Result | Evidence (command/output or observation) | Time |
@@ -56,8 +81,8 @@ Not run yet.
 | F-2 | A-09 | To be confirmed (W-18) | `uninstall --purge` leaves the account's profile, with the WSL distro registration, and does not unregister the distro. | Open: verify in W-18 |
 | F-3 | code review | Low | `opendeploy-desktop install --data DIR` is not kept across an MSI upgrade. The MSI runs `install` with no flags (opendeploy.wxs:53), and the upgrade path rewrites the service command line with the default `--data` (host_windows.go:287, 298). Status, log and token then move back to `%ProgramData%\OpenDeploy`, and `uninstall --purge` misses the custom folder. | Fixed in 12a53f3: install, upgrade, status, uninstall and purge follow the service's own `--data`, the MSI takes `DATADIR`, unsafe folders are refused, and purge deletes only a folder with the `.opendeploy-data` marker (`TestChooseDataDirFollowsInstalledService`, `TestChooseDataDirRefusesMovingNodeData`, `TestPurgeDeletesOnlyMarkedDataFolder` fail on the old code). To verify on the machine |
 | F-4 | code review; to confirm in W-17 | High (upgrades) | An MSI upgrade does not update the node. The new `opendeploy.wsl` is only imported when the distro does not exist yet (internal/desktop/wsl.go:116-128), and the guest's first-boot setup runs only while `/opt/opendeploy/slots/current` is missing (opendeploy-guest-setup.service:4). The node's own TUF updater is off by default (`update.repository_url: ""`, packaging/linux/etc/node.yaml:56) and no TUF root is shipped. So a desktop node keeps its first-installed version and has no working update path. | Open: confirm in W-17 |
-| F-5 | B1 gate (e2e, adversarial) | Medium (dev/CI runtime) | The Docker runtime adapter pins Engine API 1.43 (internal/runtime/docker.go:94, 258, 581). Docker Engine 29 (Ubuntu 24.04 docker.io 29.1.3) refuses it: "client version 1.43 is too old. Minimum supported API version is 1.44". `TestDockerIntegration` and `TestNetworkSegmentation` fail, and the e2e stage stops before the deploy suite. Production nodes use containerd and are not affected; `opendeployctl dev` and CI with a current Docker are. | Fixed in ae5534f (the client negotiates the API version, 1.43 to 1.52; `TestDockerAPIVersionNegotiation` and three more fail on the old code). Verified on Docker 29.1.3: `TestDockerIntegration`, `TestNetworkSegmentation` pass. Gate re-run pending |
-| F-6 | B1 gate (node, upgrade) | Low (test harness) | The gate booted the guest image, slept 3 s, then stopped its first-boot setup unit. On this NVMe host the unit had already installed the image's release (0.0.1-next), so the upgrade stage kept that newer release instead of installing the baseline and upgrading ("keeping the running release 0.0.1-next (newer than 0.0.0-baseline)"). | Fixed in ee7d18a: the unit is masked before boot, and the gate fails if a release is present before its own install. Gate re-run pending |
+| F-5 | B1 gate (e2e, adversarial) | Medium (dev/CI runtime) | The Docker runtime adapter pins Engine API 1.43 (internal/runtime/docker.go:94, 258, 581). Docker Engine 29 (Ubuntu 24.04 docker.io 29.1.3) refuses it: "client version 1.43 is too old. Minimum supported API version is 1.44". `TestDockerIntegration` and `TestNetworkSegmentation` fail, and the e2e stage stops before the deploy suite. Production nodes use containerd and are not affected; `opendeployctl dev` and CI with a current Docker are. | Fixed in ae5534f (the client negotiates the API version, 1.43 to 1.52; `TestDockerAPIVersionNegotiation` and three more fail on the old code). Verified on Docker 29.1.3: `TestDockerIntegration`, `TestNetworkSegmentation` pass. Gate re-run on ee7d18a: e2e and adversarial PASS |
+| F-6 | B1 gate (node, upgrade) | Low (test harness) | The gate booted the guest image, slept 3 s, then stopped its first-boot setup unit. On this NVMe host the unit had already installed the image's release (0.0.1-next), so the upgrade stage kept that newer release instead of installing the baseline and upgrading ("keeping the running release 0.0.1-next (newer than 0.0.0-baseline)"). | Fixed in ee7d18a: the unit is masked before boot, and the gate fails if a release is present before its own install. Gate re-run on ee7d18a: node and upgrade PASS |
 
 ## Measurements
 Not measured yet.
@@ -135,3 +160,10 @@ Not decided yet.
 - 2026-10-01, gate re-run of the failed stages on ee7d18a with
   `GATE_SNAPSHOTTER=native`: e2e PASS, adversarial PASS; package, node and
   upgrade running.
+- 2026-10-01, W-01 attempt 1: the tester ran `msiexec /i … DATADIR=A:\OpenDeploy /qn`
+  from a non-elevated terminal. Result 1603, "Error 1925. You do not have
+  sufficient privileges to complete this installation for all users"
+  (a silent per-machine install cannot raise UAC; expected). The rollback
+  was clean: no `C:\Program Files\OpenDeploy`, `A:\OpenDeploy`,
+  `%ProgramData%\OpenDeploy`, `opendeploy-svc` account, `HKLM\SOFTWARE\OpenDeploy`,
+  uninstall entry or PATH entry was left. Re-run from an elevated terminal.
