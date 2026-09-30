@@ -7,6 +7,21 @@ import { Alert, Badge, Button, Card, CopyButton, Field, Input, Modal, PageHeader
 import { formatDate, timeAgo } from "../lib/format";
 import { EnrollMFA } from "./AuthPages";
 
+// SessionLabel keeps the "this session" badge outside the truncated user
+// agent, so a long user agent on a narrow screen cannot hide it.
+export function SessionLabel({ agent, current }: { agent: string; current: boolean }) {
+  return (
+    <div className="flex min-w-0 items-center gap-2">
+      <p className="truncate text-zinc-200">{agent || "Unknown client"}</p>
+      {current && (
+        <span className="shrink-0">
+          <Badge tone="indigo">this session</Badge>
+        </span>
+      )}
+    </div>
+  );
+}
+
 export function AccountPage() {
   const { user, refresh } = useAuth();
   const qc = useQueryClient();
@@ -67,9 +82,7 @@ export function AccountPage() {
             {sessions.data?.map((s) => (
               <li key={s.id} className="flex items-center justify-between gap-3 px-4 py-2.5 text-sm">
                 <div className="min-w-0">
-                  <p className="truncate text-zinc-200">
-                    {s.user_agent || "Unknown client"} {s.current && <Badge tone="indigo">this session</Badge>}
-                  </p>
+                  <SessionLabel agent={s.user_agent} current={s.current} />
                   <p className="text-xs text-zinc-500">
                     {s.source_ip} · signed in {formatDate(s.created_at)} · active {timeAgo(s.last_seen_at)} {s.mfa ? "· MFA" : ""}
                   </p>
