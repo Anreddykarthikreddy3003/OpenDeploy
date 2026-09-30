@@ -398,11 +398,13 @@ func (a *App) CreateCheckRun(ctx context.Context, installationID, repoID int64, 
 
 // ManifestConversion is the result of the App Manifest flow.
 type ManifestConversion struct {
-	ID            int64  `json:"id"`
-	Slug          string `json:"slug"`
-	Name          string `json:"name"`
-	ClientID      string `json:"client_id"`
-	ClientSecret  string `json:"client_secret"`
+	ID           int64  `json:"id"`
+	Slug         string `json:"slug"`
+	Name         string `json:"name"`
+	ClientID     string `json:"client_id"`
+	ClientSecret string `json:"client_secret"`
+	// WebhookSecret is empty when the App was registered without a webhook
+	// (GitHub returns null); the node then refuses every delivery.
 	WebhookSecret string `json:"webhook_secret"`
 	PEM           string `json:"pem"`
 	HTMLURL       string `json:"html_url"`
@@ -419,19 +421,30 @@ func ConvertManifest(ctx context.Context, apiURL, code string) (*ManifestConvers
 // Manifest builds the GitHub App manifest requesting minimum permissions
 // (PRD §6.1). Pull-request read is requested so previews can be enabled per
 // project; checks write is optional and off by default.
+//
+// When GitHub cannot reach publicURL (PubliclyReachable is false: a
+// loopback desktop node, a LAN address, a .local name), the manifest has no
+// hook_attributes and no default_events: GitHub rejects a manifest whose
+// hook URL is not on the public Internet, and events need a hook. Such an
+// App still lists and fetches repositories (the node calls GitHub), but
+// pushes do not trigger deploys (F-8).
 func Manifest(name, publicURL string, withChecks bool) map[string]any {
 	perms := map[string]string{"contents": "read", "metadata": "read", "pull_requests": "read"}
 	if withChecks {
 		perms["checks"] = "write"
 	}
-	return map[string]any{
+	base := strings.TrimRight(publicURL, "/")
+	m := map[string]any{
 		"name":                name,
 		"url":                 publicURL,
-		"hook_attributes":     map[string]any{"url": strings.TrimRight(publicURL, "/") + "/webhooks/github", "active": true},
-		"redirect_url":        strings.TrimRight(publicURL, "/") + "/settings/git/callback",
-		"setup_url":           strings.TrimRight(publicURL, "/") + "/new",
+		"redirect_url":        base + "/settings/git/callback",
+		"setup_url":           base + "/new",
 		"public":              false,
 		"default_permissions": perms,
-		"default_events":      []string{"push", "pull_request"},
 	}
+	if PubliclyReachable(publicURL) {
+		m["hook_attributes"] = map[string]any{"url": base + "/webhooks/github", "active": true}
+		m["default_events"] = []string{"push", "pull_request"}
+	}
+	return m
 }

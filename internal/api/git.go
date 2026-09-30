@@ -27,7 +27,10 @@ func (s *Server) handleGitStatus(w http.ResponseWriter, r *http.Request) error {
 		conns = []store.GitConnection{}
 	}
 	slug := s.P.GitHub.Slug(ctx)
-	out := map[string]any{"configured": err == nil, "connections": conns, "public_url": s.publicBase(r)}
+	base := s.publicBase(r)
+	// webhooks: whether GitHub can reach this node, so a newly registered
+	// App gets a webhook (push-to-deploy). See github.PubliclyReachable.
+	out := map[string]any{"configured": err == nil, "connections": conns, "public_url": base, "webhooks": github.PubliclyReachable(base)}
 	if slug != "" {
 		out["install_url"] = "https://github.com/apps/" + url.PathEscape(slug) + "/installations/new"
 	}
@@ -112,6 +115,10 @@ func (s *Server) handleManifestComplete(w http.ResponseWriter, r *http.Request) 
 		return errf(502, "github", "GitHub rejected the registration: %v", err)
 	}
 	actor := s.secretActor(r)
+	// An App registered without a webhook gets webhook_secret null from
+	// GitHub. The empty value is stored anyway so it replaces the secret of
+	// any earlier App; an empty secret makes /webhooks/github refuse all
+	// deliveries (F-8).
 	for name, val := range map[string]string{platform.SecretGitHubAppID: strconv.FormatInt(conv.ID, 10), platform.SecretGitHubSlug: conv.Slug,
 		platform.SecretGitHubPrivateKey: conv.PEM, platform.SecretGitHubWebhook: conv.WebhookSecret} {
 		sensitive := name == platform.SecretGitHubPrivateKey || name == platform.SecretGitHubWebhook
@@ -121,7 +128,7 @@ func (s *Server) handleManifestComplete(w http.ResponseWriter, r *http.Request) 
 	}
 	s.P.GitHub.Reset()
 	s.audit(r, "git.connect", "github_app", strconv.FormatInt(conv.ID, 10), "", audit.Success, map[string]string{"target": conv.Slug})
-	writeJSON(w, 200, map[string]string{"name": conv.Name, "slug": conv.Slug,
+	writeJSON(w, 200, map[string]any{"name": conv.Name, "slug": conv.Slug, "webhooks": conv.WebhookSecret != "",
 		"install_url": "https://github.com/apps/" + url.PathEscape(conv.Slug) + "/installations/new"})
 	return nil
 }

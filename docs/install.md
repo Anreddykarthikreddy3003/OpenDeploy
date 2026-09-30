@@ -125,6 +125,7 @@ sudo /Library/OpenDeploy/uninstall.sh --purge    # deletes the VM and all node d
 
 ## Next steps
 - Connect GitHub under Platform → GitHub (create the App from the manifest).
+  On Windows and macOS, and on any node whose `api.public_url` GitHub cannot reach (loopback, a private or `.local` address), the App is created without a webhook. Private repositories still import and build, but pushes do not deploy automatically: deploy from the dashboard or with `opendeployctl deploy <project>`. For push-to-deploy, expose the node through a relay (`docs/relay.md`) and use its public URL.
 - Import a repository, or deploy a local directory:
   ```sh
   opendeployctl upload myapp ./

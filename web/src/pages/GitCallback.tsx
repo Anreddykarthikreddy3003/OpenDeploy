@@ -8,7 +8,7 @@ import { Alert, Button, Card, Loading, PageHeader } from "../components/ui";
 // user who started the flow).
 export function GitCallbackPage() {
   const [params] = useSearchParams();
-  const [res, setRes] = useState<{ name: string; install_url: string } | null>(null);
+  const [res, setRes] = useState<{ name: string; install_url: string; webhooks?: boolean } | null>(null);
   const [err, setErr] = useState("");
   const once = useRef(false);
   useEffect(() => {
@@ -20,7 +20,7 @@ export function GitCallbackPage() {
       setErr("Missing code or state from GitHub.");
       return;
     }
-    post<{ name: string; install_url: string }>("/api/v2/git/github/manifest/complete", { code, state })
+    post<{ name: string; install_url: string; webhooks?: boolean }>("/api/v2/git/github/manifest/complete", { code, state })
       .then(setRes)
       .catch((e) => setErr(errorMessage(e)));
   }, [params]);
@@ -33,8 +33,13 @@ export function GitCallbackPage() {
         {res && (
           <div className="space-y-4">
             <Alert tone="green" title={`GitHub App "${res.name}" created`}>
-              Its private key and webhook secret are stored encrypted by secretd.
+              {res.webhooks === false ? "Its private key is stored encrypted by secretd." : "Its private key and webhook secret are stored encrypted by secretd."}
             </Alert>
+            {res.webhooks === false && (
+              <Alert tone="amber" title="No webhook: pushes do not deploy automatically">
+                This node is not reachable from the internet, so the app has no webhook. Import and redeploy from the dashboard or with opendeployctl.
+              </Alert>
+            )}
             <p className="text-sm text-zinc-400">Install the app on the accounts and repositories OpenDeploy should deploy.</p>
             <div className="flex gap-2">
               <a href={res.install_url} rel="noreferrer">

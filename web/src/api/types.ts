@@ -260,6 +260,9 @@ export interface GitStatus {
   configured: boolean;
   connections: GitConnection[];
   public_url: string;
+  // False when GitHub cannot reach public_url (loopback, private or .local
+  // address): a new App is registered without a webhook.
+  webhooks: boolean;
   install_url?: string;
   error?: string;
 }

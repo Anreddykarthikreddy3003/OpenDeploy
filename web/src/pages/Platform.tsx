@@ -264,9 +264,22 @@ function GitHub() {
       {!g.configured ? (
         <Card title="Register a GitHub App">
           <p className="mb-4 text-sm text-zinc-400">
-            OpenDeploy creates a private GitHub App for this node with read-only repository contents access{checks ? " and check-run status" : ""}. Webhooks go to <Code>{g.public_url}/webhooks/github</Code>, which must be
-            reachable from GitHub.
+            OpenDeploy creates a private GitHub App for this node with read-only repository contents access{checks ? " and check-run status" : ""}.
+            {g.webhooks ? (
+              <>
+                {" "}
+                Webhooks go to <Code>{g.public_url}/webhooks/github</Code>, which must be reachable from GitHub.
+              </>
+            ) : null}
           </p>
+          {!g.webhooks && (
+            <div className="mb-4">
+              <Alert tone="amber" title="No webhook: pushes do not deploy automatically">
+                This node (<Code>{g.public_url}</Code>) is not reachable from the internet, so the app is created without a webhook. Import and redeploy from the
+                dashboard or with <Code>opendeployctl deploy &lt;project&gt;</Code>. To deploy on push, expose the node through a relay (<Code>docs/relay.md</Code>).
+              </Alert>
+            </div>
+          )}
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="Organization (optional)" hint="Leave empty to create the app on your personal account.">
               <Input value={org} onChange={(e) => setOrg(e.target.value.trim())} />

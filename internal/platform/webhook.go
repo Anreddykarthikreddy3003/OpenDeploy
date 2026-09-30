@@ -37,6 +37,11 @@ func (p *Platform) HandleGitHubWebhook(ctx context.Context, event, delivery, sig
 	if err != nil {
 		return deny(503, "github app not configured")
 	}
+	if len(secret) == 0 {
+		// The App was registered without a webhook (F-8): nothing can be
+		// verified, so nothing is accepted, whatever the signature says.
+		return deny(401, "webhooks are not enabled for this GitHub App")
+	}
 	if err := github.VerifySignature(secret, body, signature); err != nil {
 		return deny(401, "invalid signature")
 	}

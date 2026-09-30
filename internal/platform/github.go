@@ -100,11 +100,15 @@ func (g *GitHubProvider) loadLocked(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		wh, err := config.ReadSecretFile(c.WebhookSecretFile)
-		if err != nil {
-			return err
+		// No webhook_secret_file: an App without a webhook (F-8). A file
+		// that is set but unreadable is still an error.
+		wh := []byte{}
+		if c.WebhookSecretFile != "" {
+			if wh, err = config.ReadSecretFile(c.WebhookSecretFile); err != nil {
+				return err
+			}
 		}
-		g.app, g.webhook, g.slug = github.NewApp(c.AppID, key, api), wh, c.AppSlug
+		g.app, g.webhook, g.slug = github.NewApp(c.AppID, key, api), noNil(wh), c.AppSlug
 		return nil
 	}
 	// 2. Credentials registered through the manifest flow (secretd).
@@ -149,11 +153,23 @@ func (g *GitHubProvider) loadLocked(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// An App registered without a webhook (the node was not reachable from
+	// GitHub, F-8) has an empty or absent webhook secret. That is a valid
+	// state: the App works, and HandleGitHubWebhook refuses every delivery.
 	wh, err := reveal(SecretGitHubWebhook)
-	if err != nil {
+	if err != nil && !errors.Is(err, ErrGitHubNotConfigured) {
 		return err
 	}
 	slug, _ := reveal(SecretGitHubSlug)
-	g.app, g.webhook, g.slug = github.NewApp(appID, key, api), []byte(wh), slug
+	g.app, g.webhook, g.slug = github.NewApp(appID, key, api), noNil([]byte(wh)), slug
 	return nil
+}
+
+// noNil keeps an empty webhook secret distinguishable from "not loaded yet"
+// (nil), so WebhookSecret does not reload on every delivery.
+func noNil(b []byte) []byte {
+	if b == nil {
+		return []byte{}
+	}
+	return b
 }

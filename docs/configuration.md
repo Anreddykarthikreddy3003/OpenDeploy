@@ -115,11 +115,13 @@ Or copy PEM files into `/etc/opendeploy/ca.d/` yourself.
 | Key | Meaning |
 |---|---|
 | `app_id`, `app_slug` | The GitHub App identity. |
-| `private_key_file`, `webhook_secret_file` | App credentials. Files must be mode 0600 or stricter. |
+| `private_key_file`, `webhook_secret_file` | App credentials. Files must be mode 0600 or stricter. Without `webhook_secret_file` the App works but every webhook delivery is refused. |
 | `client_id`, `client_secret_file` | For "Sign in with GitHub" repository selection in the dashboard. |
 | `api_url` | For GitHub Enterprise Server. |
 
 The App requests only: Contents read, Pull requests read, Metadata read, and Checks write if check runs are enabled.
+
+**Webhooks need a public URL.** Platform → GitHub registers the App with a webhook at `<api.public_url>/webhooks/github` only if GitHub can reach that URL. When `public_url` is a loopback, private (RFC 1918, `fc00::/7`), link-local, unspecified or CGNAT (`100.64.0.0/10`) address, or a `localhost`, `*.localhost`, `*.local`, `*.internal` or single-label name, as on every Windows and macOS desktop node, GitHub rejects such a hook, so the App is registered without a webhook and without event subscriptions. Repositories can still be listed, imported and built, since the node calls GitHub, but pushes and pull requests do not trigger deployments: deploy from the dashboard or with `opendeployctl deploy <project>`. The node then has no webhook secret and refuses every delivery to `/webhooks/github`. For push-to-deploy, publish the node through a relay (`docs/relay.md`), set `public_url` to its public hostname, and register the App again.
 
 ## `secrets`
 
